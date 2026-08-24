@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Anima-Remap: remap cache files (save_remapped output). These are meant to
+# live next to the user's own LoRA files outside this repo, but are ignored
+# here in case one ever ends up in a working copy during testing.
+*_animaremap*.safetensors
+*_animaremap*.pt
+*_animaremap*.ckpt
+*_animaremap*.sft
+
+# Composed manifests are meant to be committed (they're small JSON files and
+# other users benefit from not having to run compose_manifests.py
+# themselves), so they are intentionally NOT ignored here.
