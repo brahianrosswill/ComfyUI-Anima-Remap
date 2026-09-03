@@ -2,6 +2,8 @@
 
 [English](README.md) | [日本語](README_ja.md)
 
+> **補足（Anima-3.8B v1.1以降について）：** Animaのチェックポイントによっては、Qwen3.5 4B用のcross-attention部分（`semantic_attentions.*`などのconnector関連キー）が、別ファイルのアダプターとしてではなく、DiT本体と同一ファイルに同梱されている場合があります（Anima-3.8B v1.1の"Semantic Connector v2"以降でこの形になりました）。どちらの形で配布されていても、この部分がremap処理の対象になることはありません——検出・remapともに`net.blocks.N`というキーのみを見ており、connector側のキーはこのパターンに一致しないためです。実機確認済み：Qwen3.5を接続しない状態でも、ネイティブのQwen3 0.6B経路のみで生成は問題なく行えます。詳細は下記「Anima-3.8B（52層）対応について」を参照してください。
+
 Anima系モデル(従来Anima/28層、Anima-2.9B/40層、Anima-3.8B/52層、そして今後登場するかもしれない世代)を横断して、LoRA適用・モデルマージ時のレイヤー構造の違いを自動的に吸収するComfyUIカスタムノードパッケージです。どの2世代の組み合わせであっても対応します。Anima専用のランダムLoRAローダー(フォルダ指定、同じ自動リマップ機構を内蔵)も含まれます。
 
 このリポジトリは、更新を停止した[ComfyUI-Anima29B-Remap](https://github.com/shin131002/ComfyUI-Anima29B-Remap)の後継です。ノード内部IDは変更していないので、そちらのリポジトリ向けに作ったワークフローもそのまま読み込めます。
@@ -299,7 +301,7 @@ LoRA Extended版のキャッシュファイルは、Extended版であること�
 
 ## Anima-3.8B(52層)対応について
 
-[lylogummy/Anima-3.8B](https://huggingface.co/lylogummy/Anima-3.8B)(52層)は、Anima-2.9Bをコミュニティが52ブロック(既存40ブロック+新規学習12ブロック)まで拡張したモデルで、プロンプト理解力向上のためのQwen3.5 4B cross-attention adapter(オプション)と対になっています。本パッケージが扱うのは52層チェックポイントの**DiTブロック構造のみ**です。Qwen3.5 adapterは完全に別個の追加コンポーネント(`semantic_attentions.*`という、どの`net.blocks.N`パターンにも一致しない独自キーを持つ別チェックポイントファイル)であり、リマップ処理は一切関与しません。従来40層Anima-2.9BのDiT向けに作られたLoRA・マージ用モデルは、これまでのAnima-2.9B向けリマップと全く同じ考え方で52層のDiTにリマップされます。
+[lylogummy/Anima-3.8B](https://huggingface.co/lylogummy/Anima-3.8B)(52層)は、Anima-2.9Bをコミュニティが52ブロック(既存40ブロック+新規学習12ブロック)まで拡張したモデルで、プロンプト理解力向上のためのQwen3.5 4B cross-attentionコンポーネント(オプション)と対になっています。このコンポーネントはリリースによって、別ファイルのアダプターとして配布される場合(初期のpreview版)と、DiT本体のチェックポイントに同梱される場合(Anima-3.8B v1.1の"Semantic Connector v2"以降)があり、この配布形態は既に一度変わっており、今後さらに変わる可能性もあります。本パッケージが扱うのは52層チェックポイントの**DiTブロック構造のみ**です。どちらの形で配布されていても、Qwen3.5コンポーネントは独立した追加キー群(`semantic_attentions.*`など、どの`net.blocks.N`パターンにも一致しない関連キー)であり、リマップ処理は一切関与しません——検出・リマップともに`net.blocks.N`というキーのみを見ています。従来40層Anima-2.9BのDiT向けに作られたLoRA・マージ用モデルは、これまでのAnima-2.9B向けリマップと全く同じ考え方で52層のDiTにリマップされます。実機確認済み：Qwen3.5を完全に未接続にしても(ネイティブのQwen3 0.6B経路のみ)、生成は問題なく行えます。
 
 > **出典について:** 公式のAnima→Anima-2.9B用`expand_manifest.json`とは異なり、Anima-2.9B→Anima-3.8Bの拡張については公式の対応表が公開されていません。`mapping/expand_manifest_40_52.json`は、`anima38B_base.safetensors`とAnima-2.9Bチェックポイントをブロック単位で比較(`self_attn.q_proj.weight`と`mlp.layer1.weight`のコサイン類似度、相互にクロスチェック済み)することで復元したものです。これはLLaMA Pro方式に典型的な「隣接ブロックをコピーしてから追加学習する」という初期化パターンを検出する手法です。今後公式の対応表が公開された場合はこのファイルを差し替え、`mapping/expand_manifest_28_52_composed.json`も再生成してください(下記参照)。
 
