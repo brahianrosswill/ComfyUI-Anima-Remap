@@ -97,6 +97,7 @@ A LoRA loader with the same `<lora:name:weight>` tag syntax used by LoRA Tag Pow
 | `model` | MODEL | Model with the LoRA(s) applied |
 | `clip` | CLIP | CLIP with the LoRA(s) applied |
 | `text` | STRING | The prompt string with LoRA tags stripped out (feed this to your downstream CLIP Text Encoder) |
+| `remap_info` | STRING | One line per LoRA tag describing what happened to it — cache hit, `28->52 via <manifest>`, extension counts, or `applied as-is`. Useful for feeding into a text overlay / metadata node, or just wiring to a preview to confirm a mixed-generation prompt resolved the way you expected |
 
 ### Tag syntax
 
@@ -105,6 +106,24 @@ A LoRA loader with the same `<lora:name:weight>` tag syntax used by LoRA Tag Pow
 ```
 
 You can also specify the CLIP weight separately with `<lora:name:model_weight:clip_weight>` (if omitted, it defaults to the model weight).
+
+#### How the name is matched
+
+The canonical form is the bare filename — no folder, no extension — which is what A1111-style syntax uses and what LoRA Manager's "copy syntax" button produces. That form is always the safest.
+
+Several looser spellings are accepted too, so a name copied out of ComfyUI's own LoRA dropdown (which shows a relative path, with `\` as the separator on Windows) works as well:
+
+| Written as | Matches |
+|---|---|
+| `<lora:mylora:0.8>` | canonical — bare filename |
+| `<lora:mylora.safetensors:0.8>` | extension included |
+| `<lora:style/mylora:0.8>` | subfolder included |
+| `<lora:style\mylora.safetensors:0.8>` | Windows separator + extension |
+| `<lora:STYLE/MyLora:0.8>` | case-insensitive throughout |
+
+If you leave the subfolder out and two files in different subfolders share that filename, the first match is used and a warning naming all of the candidates is logged — include the subfolder in the tag to pick a specific one.
+
+When a name can't be matched at all, the warning says whether ComfyUI can see your LoRA folder (so the name is what's wrong) or reports zero LoRA files (so it's a folder/path configuration problem).
 
 ### Auto-detection logic (overview)
 
@@ -122,25 +141,70 @@ Because this happens per tag, a single prompt referencing LoRAs from different A
 
 `save_remapped` is a toggle that controls **whether the remapped LoRA gets saved to disk as a file**. Saving it lets subsequent runs skip the remapping step entirely and just load the saved file directly.
 
-The cache filename encodes the **target block count it was remapped for** (e.g. `<name>_animaremap52.<ext>`), not just the LoRA's name — so a cache made while targeting a 40-block model is never mistakenly reused if you later connect a 52-block model with the same LoRA. Each (LoRA, target generation) pair gets its own cache file.
+The cache filename encodes both the **target block count** it was remapped for and a **short hash of the settings** that produced it — e.g. `<name>_animaremap52_a7f6b0.<ext>`. Change `manifest`, `extend_to_new_layers`, or `extend_strength` and the hash changes with them, so the old cache is no longer a match and a fresh remap runs under your current settings.
 
-> ⚠️ **Caution: while you're still tuning `manifest`, `extend_strength`, or `extend_to_new_layers`, we strongly recommend keeping `save_remapped` OFF.**
+#### What the settings hash covers
+
+| Setting | In the hash? |
+|---|---|
+| Target block count | Always |
+| Resolved manifest filename | Always |
+| `extend_to_new_layers` | Always |
+| `extend_strength` | Only when `extend_to_new_layers` is ON |
+| `blend_ratio` (Extended node) | Only when `extend_to_new_layers` is ON |
+
+Two normalisation rules keep the number of files down:
+
+- The hash uses the **resolved** manifest filename, not the dropdown text. Leaving `manifest` on `Auto (Recommended)` and manually picking the file Auto would have chosen produce identical output, so they share one cache file.
+- When `extend_to_new_layers` is OFF, `extend_strength` and `blend_ratio` have no effect on the result, so they're left out of the hash entirely. In this common case each (LoRA, target, manifest) combination collapses to a single cache file no matter how those sliders are set.
+
+> ⚠️ **Caution: `save_remapped` ON + repeated setting changes = a growing pile of cache files.**
 >
-> Once a cache file has been saved even once, **any later changes to `manifest`, `extend_to_new_layers`, or `extend_strength` will have no effect at all** for that (LoRA, target) pair. As long as the cache file exists, its contents — baked in at whatever settings were active the moment it was saved — will keep being loaded and take priority over your current node settings.
+> Each distinct combination of settings now produces its own file, and **nothing is ever deleted automatically**. Leaving `save_remapped` ON while you tune settings run after run will quietly fill your LoRA folder with `_animaremap<N>_<hash>` files — one per combination you tried, each roughly the size of the original LoRA.
 >
-> The recommended workflow is:
+> This is why `save_remapped` still defaults to **OFF**, and why the recommended workflow is unchanged: experiment with `save_remapped` OFF, then turn it ON for a single run once you've settled on your settings. Sweep through the folder and delete the `_animaremap*` files you don't want to keep whenever they build up.
+
+> ⚠️ **Replacing a LoRA in-place under the same filename will keep using the old cache.**
 >
-> 1. Keep `save_remapped` **OFF** while you experiment with `manifest` / `extend_to_new_layers` / `extend_strength` to find settings you like (during this phase, the LoRA is remapped fresh on every run and nothing is written to disk)
-> 2. Once you've settled on values, turn `save_remapped` **ON** for a single run to write out the final cache file
-> 3. If you want to try different settings again later, delete the generated cache file first, then go back to step 1
+> The hash covers your node settings, not the contents of the source LoRA. If you retrain a LoRA and overwrite the original file with the same name, the settings are unchanged, so the hash is unchanged, so the existing cache file still matches and gets loaded — with the old weights baked in, silently. **Delete the corresponding `_animaremap*` cache file by hand after replacing a LoRA this way.**
 
-This is the full sequence of events for a given tag (which only occurs when the LoRA is determined to need remapping for the connected model's block count):
+#### Legacy cache files
 
-1. **First, check whether a file named `<original LoRA name>_animaremap<target block count>.<extension>` already exists**, using the same lookup method as for the original LoRA (including subfolders)
-2. **If it exists**: load that file directly and apply it. No remapping is performed at all — an existing cache file always takes priority, regardless of the `save_remapped` setting
-3. **If it doesn't exist**: load the original LoRA, remap its keys on the fly, and apply it. If `save_remapped` is ON at this point, the remapped result is saved as `<original LoRA name>_animaremap<target block count>.<extension>` **in the same folder as the original LoRA** (if a file with that name already exists for some other reason, it is not overwritten — the save is skipped). If `save_remapped` is OFF, the LoRA is still applied, but nothing is written to disk (so this "remap on the fly" step will happen again on every subsequent run)
+Cache files written before the hash was introduced (`<name>_animaremap52.<ext>`, `<name>_animaremap52_ext.<ext>`) are **no longer loaded**. There's no way to tell which manifest or extension settings produced them, which is exactly the problem the hash exists to solve. When one is found, the node logs a warning naming the file and remaps fresh instead. These files are now dead weight — delete them. (They're still recognised as cache files for the purposes of Nodes 5 & 6's folder scans, so they won't be picked up as stray LoRA candidates in the meantime.)
 
-In short, leaving `save_remapped` ON means the cache file generated on the first run keeps getting reused afterward for that same (LoRA, target generation) combination, so **every subsequent run applies the LoRA with no remapping overhead**.
+#### Sequence of events
+
+This is the full sequence for a given tag (which only occurs when the LoRA is determined to need remapping for the connected model's block count):
+
+1. **Read the source LoRA's safetensors header** (key names only — no tensor data) to get its block count, resolve which manifest applies, and compute the settings hash. This is what makes it possible to know which cache file to look for without loading anything heavy
+2. **Check whether `<original LoRA name>_animaremap<target>_<hash>.<extension>` exists**, using the same lookup method as for the original LoRA (including subfolders)
+3. **If it exists**: load that file directly and apply it. No remapping is performed — a matching cache file always takes priority, regardless of the `save_remapped` setting
+4. **If it doesn't exist**: load the original LoRA, remap its keys on the fly, and apply it. If `save_remapped` is ON at this point, the result is saved under that hashed name **in the same folder as the original LoRA** (an existing file of that name is never overwritten — the save is skipped). If `save_remapped` is OFF, the LoRA is still applied, but nothing is written to disk
+
+<details>
+<summary>Previous behaviour (before the settings hash) — kept for reference</summary>
+
+The text below described how the cache worked before filenames included a settings hash. It is **no longer accurate**; it's retained only so the change is easy to follow.
+
+> ~~The cache filename encodes the **target block count it was remapped for** (e.g. `<name>_animaremap52.<ext>`), not just the LoRA's name — so a cache made while targeting a 40-block model is never mistakenly reused if you later connect a 52-block model with the same LoRA. Each (LoRA, target generation) pair gets its own cache file.~~
+>
+> ~~⚠️ **Caution: while you're still tuning `manifest`, `extend_strength`, or `extend_to_new_layers`, we strongly recommend keeping `save_remapped` OFF.**~~
+>
+> ~~Once a cache file has been saved even once, **any later changes to `manifest`, `extend_to_new_layers`, or `extend_strength` will have no effect at all** for that (LoRA, target) pair. As long as the cache file exists, its contents — baked in at whatever settings were active the moment it was saved — will keep being loaded and take priority over your current node settings.~~
+>
+> ~~The recommended workflow is:~~
+>
+> ~~1. Keep `save_remapped` **OFF** while you experiment with `manifest` / `extend_to_new_layers` / `extend_strength` to find settings you like (during this phase, the LoRA is remapped fresh on every run and nothing is written to disk)~~
+> ~~2. Once you've settled on values, turn `save_remapped` **ON** for a single run to write out the final cache file~~
+> ~~3. If you want to try different settings again later, delete the generated cache file first, then go back to step 1~~
+>
+> ~~1. **First, check whether a file named `<original LoRA name>_animaremap<target block count>.<extension>` already exists**, using the same lookup method as for the original LoRA (including subfolders)~~
+> ~~2. **If it exists**: load that file directly and apply it. No remapping is performed at all — an existing cache file always takes priority, regardless of the `save_remapped` setting~~
+> ~~3. **If it doesn't exist**: load the original LoRA, remap its keys on the fly, and apply it. If `save_remapped` is ON at this point, the remapped result is saved as `<original LoRA name>_animaremap<target block count>.<extension>` **in the same folder as the original LoRA** (if a file with that name already exists for some other reason, it is not overwritten — the save is skipped). If `save_remapped` is OFF, the LoRA is still applied, but nothing is written to disk (so this "remap on the fly" step will happen again on every subsequent run)~~
+>
+> ~~In short, leaving `save_remapped` ON means the cache file generated on the first run keeps getting reused afterward for that same (LoRA, target generation) combination, so **every subsequent run applies the LoRA with no remapping overhead**.~~
+
+</details>
 
 ### Notes
 
@@ -198,7 +262,7 @@ final new-layer value = (1 - extend_ratio) * larger model's own value + extend_r
 
 At `extend_ratio = 1.0`, the new layers are fully replaced by the smaller model's (approximated) values as well. This follows the same idea as the LoRA node's `extend_to_new_layers` / `extend_strength`, but is an independent feature — and, just like there, it's a best-effort approximation with no "correct" answer.
 
-Since this node has no built-in save function (see below), it doesn't have the same "settings silently stop applying once cached" caveat that the LoRA node's `save_remapped` does — saving a merge result always requires explicitly running the `ModelSave` node, so there's no risk of unknowingly reusing a file baked with outdated settings.
+Since this node has no built-in save function (see below), it never writes a cache file at all, so none of the `save_remapped` cache considerations on the LoRA node apply here — saving a merge result always requires explicitly running the `ModelSave` node, so there's no risk of unknowingly reusing a file baked with outdated settings.
 
 ### Bypass behavior
 
@@ -243,7 +307,9 @@ value applied to the new layer = front (preceding) layer's value * blend_ratio +
 
 ### About the cache file
 
-The LoRA Extended node's cache file uses a suffix that both marks it as the Extended variant's cache AND encodes the target block count it was made for (e.g. `_animaremap52_ext`), so it never collides with the regular node's cache (`_animaremap52`) or with a cache made for a different target generation. As with the regular node, we recommend keeping `save_remapped` OFF while you're still experimenting with `manifest` / `extend_to_new_layers` / `blend_ratio` / `extend_strength` (the same caveat applies here — a cached file reflects only what was selected the moment it was saved).
+The LoRA Extended node's cache file uses a suffix that marks it as the Extended variant's cache, encodes the target block count it was made for, and carries the settings hash — e.g. `_animaremap52_ext_a7f6b0` — so it never collides with the regular node's cache (`_animaremap52_<hash>`), with a cache made for a different target generation, or with one made under different settings. `blend_ratio` is part of this node's hash (only when `extend_to_new_layers` is ON, since it has no effect otherwise).
+
+Everything in [About the remap cache](#about-the-remap-cache-save_remapped) applies here too — including the two cautions: changing settings with `save_remapped` ON accumulates one file per combination, and replacing a LoRA in-place under the same filename will keep using the old cache.
 
 Both Extended and regular LoRA nodes also share the same per-tag manifest resolution and stop-on-mismatch behavior described above: a LoRA that references more blocks than the connected model has cannot be remapped down, so the node raises an error and stops rather than silently applying it partially.
 
@@ -270,11 +336,12 @@ Both share the same trigger-word extraction, preview-image output, and strength-
 - **Anima only.** These are not general SD1.5/SDXL/Flux loaders — see [RandomLoRALoader](https://github.com/shin131002/RandomLoRALoader) for those.
 - **No LoRA Block Weight (LBW) support.** Anima's flat transformer-block layout doesn't map onto the SD1.5/SDXL IN/MID/OUT preset convention that LBW relies on, so this is out of scope for now.
 - **No `save_remapped` / on-disk remap caching.** These nodes are built around picking a different LoRA per run — a cache file would go stale silently the moment `manifest`/`extend_to_new_layers`/`blend_ratio`/`extend_strength` changed, and would also get re-discovered by the folder scan as a second, metadata-less "duplicate" LoRA candidate. Every run remaps in-memory instead; LoRA files are small, so the extra cost is negligible next to generation time.
-- **Folder scans exclude any `_animaremap<N>` / `_animaremap<N>_ext` cache files** written by Nodes 1–4. If you've used those with `save_remapped` ON in the same LoRA folders, those cached copies are automatically skipped rather than being treated as extra candidates.
+- **Folder scans follow symbolic links**, matching ComfyUI's own folder scan. A subfolder that is a symlink is descended into, so LoRAs that only exist behind a link are included as candidates just like they are in ComfyUI's native dropdown. Link loops are detected and skipped rather than hanging the scan.
+- **Folder scans exclude any `_animaremap<N>` / `_animaremap<N>_ext` cache files** written by Nodes 1–4, in both the current hashed form (`_animaremap52_a7f6b0`) and the older un-hashed form (`_animaremap52`). If you've used those with `save_remapped` ON in the same LoRA folders, those cached copies are automatically skipped rather than being treated as extra candidates.
 - **Remap settings are ONE shared set**, not per-folder/per-group — `auto_remap`, `manifest`, `extend_to_new_layers`, `blend_ratio`, `extend_strength` apply uniformly across the node. The **manifest that actually gets used is still resolved per LoRA**, though: a folder mixing 28-block and 40-block LoRAs, run against a 52-block model, correctly remaps each one with its own matching manifest when `manifest` is left on `Auto`.
 - **Same stop-on-mismatch behavior as Nodes 1–4**: if a randomly-selected LoRA references more blocks than the connected model has, the node raises an error and stops rather than silently applying a partial LoRA.
 
-### Inputs (Random LoRA Loader — Filtered is the same idea with 1 folder + keyword filter instead of 3 folders)
+### Inputs (Random LoRA Loader — 3 folder groups)
 
 | Name | Type | Description |
 |---|---|---|
@@ -292,6 +359,22 @@ Both share the same trigger-word extraction, preview-image output, and strength-
 | `blend_ratio` | FLOAT | Shared across the node (default: 1.0) |
 | `extend_strength` | FLOAT | Shared across the node (default: 0.5) |
 | `manifest` | dropdown | `Auto (Recommended)` (default) resolves the manifest per selected LoRA. Selecting a specific file forces that one for every LoRA instead |
+
+### Inputs (Filtered Random LoRA Loader)
+
+One folder plus keyword filtering, instead of three folder groups. Everything not listed here behaves the same as the table above.
+
+| Name | Type | Description |
+|---|---|---|
+| `lora_folder_path` | STRING | The single folder to select from |
+| `include_subfolders` | BOOLEAN | Recurse into subfolders (default: ON) |
+| `unique_by_filename` | BOOLEAN | Exclude duplicate filenames across subfolders (default: ON) |
+| `keyword_filter` | STRING | Space-separated keywords; wrap a multi-word phrase in double quotes (`"anime style" red`). Empty means no filtering |
+| `filter_mode` | dropdown | `AND` (default) requires every keyword to match, `OR` requires any one |
+| `search_in_metadata` | BOOLEAN | Also search inside each LoRA file's metadata, not just its filename (default: OFF). Much slower on the first scan of a large folder, since every file's header has to be read; results are cached per node instance afterward |
+| `model_strength` / `clip_strength` | STRING | Fixed (`"1.0"`) or random range (`"0.4-0.8"`) |
+| `num_loras` | INT | How many LoRAs to pick (0–20) |
+
 
 ### Outputs
 

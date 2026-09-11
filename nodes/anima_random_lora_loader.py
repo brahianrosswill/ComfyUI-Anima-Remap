@@ -138,7 +138,21 @@ class AnimaRandomLoRALoader:
         extensions = ('.safetensors', '.pt', '.ckpt')
         found = []
         if include_subfolders:
-            for root, _dirs, files in os.walk(folder_path):
+            # followlinks=True matches what ComfyUI's own folder scan
+            # (folder_paths.recursive_search) does. Without it, a subfolder that
+            # is a symlink is skipped entirely, so LoRAs that show up fine in
+            # ComfyUI's native dropdown would silently never be picked here.
+            #
+            # The realpath set is the price of following links: it stops a
+            # symlink loop from hanging the scan, and also keeps a folder
+            # reachable through two different links from being scanned twice.
+            seen_dirs = set()
+            for root, dirs, files in os.walk(folder_path, followlinks=True):
+                real_root = os.path.realpath(root)
+                if real_root in seen_dirs:
+                    dirs[:] = []
+                    continue
+                seen_dirs.add(real_root)
                 for file in files:
                     if file.lower().endswith(extensions):
                         found.append(os.path.join(root, file))

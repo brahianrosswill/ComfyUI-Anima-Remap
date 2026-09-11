@@ -10,6 +10,7 @@ Used by both lora_remap_anima.py and checkpoint_merge_anima.py so the two
 nodes can never disagree about how blocks are detected or mapped.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -149,6 +150,24 @@ def _all_manifests_by_block_counts():
         except KeyError:
             logger.warning(f"manifest {filename} is missing old_block_count/new_block_count -- skipped for Auto-selection")
     return index
+
+
+def resolve_manifest_filename(manifest_choice, source_block_count, target_block_count):
+    """
+    The FILENAME resolve_manifest() would load, without loading it.
+
+    Exists so the cache-filename hash can be built from the manifest that will
+    actually be used, rather than from the dropdown string: picking
+    "Auto (Recommended)" and manually picking the file Auto resolves to give
+    identical output, so they must hash identically. Returns None when no
+    manifest covers the pair (same condition under which resolve_manifest()
+    returns None).
+    """
+    if manifest_choice != AUTO_MANIFEST_LABEL:
+        return manifest_choice
+    if source_block_count is None or target_block_count is None:
+        return None
+    return _all_manifests_by_block_counts().get((source_block_count, target_block_count))
 
 
 def resolve_manifest(manifest_choice, source_block_count, target_block_count):
@@ -332,7 +351,7 @@ def get_lora_block_count(lora_sd_keys):
 # LoRA candidate).
 # ---------------------------------------------------------------------------
 
-_REMAP_CACHE_PATTERN = re.compile(r"_animaremap\d+(_ext)?$")
+_REMAP_CACHE_PATTERN = re.compile(r"_animaremap\d+(_ext)?(_[0-9a-f]{6})?$")
 
 
 def is_remap_cache_filename(stem):
@@ -344,3 +363,71 @@ def is_remap_cache_filename(stem):
     a pattern match, not a fixed-suffix check.
     """
     return bool(_REMAP_CACHE_PATTERN.search(stem))
+
+
+# ---------------------------------------------------------------------------
+# Remap-cache settings hash
+# ---------------------------------------------------------------------------
+
+REMAP_CACHE_HASH_LEN = 6
+
+
+def compute_remap_settings_hash(manifest_filename, target_block_count,
+                                extend_to_new_layers, extend_strength,
+                                blend_ratio=None, extended_node=False):
+    """
+    Short hex digest of every setting that actually changes the CONTENT of a
+    remapped LoRA, so a cache file made under one set of settings can never be
+    silently reused under another.
+
+    Normalisation rules (these decide how many cache files pile up on disk):
+      - `manifest_filename` must be the RESOLVED manifest filename, not the
+        dropdown string. "Auto (Recommended)" and manually picking the file
+        Auto would have chosen produce the same content, so they hash the same.
+      - When extend_to_new_layers is False, blend_ratio/extend_strength have no
+        effect on the output and are left out of the digest entirely -- the
+        common case therefore collapses to one cache file per
+        (LoRA, target_block_count, manifest).
+      - blend_ratio is only part of the digest for the extended node; the base
+        node has no such input.
+
+    NOT covered: the source LoRA file being replaced in-place under the same
+    name. Same settings -> same digest -> the stale cache is reused. Delete the
+    cache file by hand after retraining a LoRA to the same filename.
+    """
+    payload = {
+        "manifest": manifest_filename or "",
+        "target": target_block_count,
+        "extend": bool(extend_to_new_layers),
+    }
+    if extend_to_new_layers:
+        payload["extend_strength"] = round(float(extend_strength), 6)
+        if extended_node:
+            payload["blend_ratio"] = round(float(blend_ratio if blend_ratio is not None else 1.0), 6)
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:REMAP_CACHE_HASH_LEN]
+
+
+def peek_lora_block_count(path):
+    """
+    Block count of a LoRA read from the safetensors HEADER only -- no tensor
+    data is loaded.
+
+    Needed because the cache filename now embeds a settings hash, and that hash
+    depends on the resolved manifest, which in turn depends on this LoRA's own
+    block count. Loading the whole file just to work out which cache file to
+    look for would defeat the point of caching, so the header (a JSON blob at
+    the start of the file) is read instead.
+
+    Returns None for non-safetensors files or any read failure -- callers should
+    fall back to loading the file normally.
+    """
+    if not path or not path.lower().endswith(".safetensors"):
+        return None
+    try:
+        from safetensors import safe_open
+        with safe_open(path, framework="pt", device="cpu") as f:
+            return get_lora_block_count(list(f.keys()))
+    except Exception as e:
+        logger.debug(f"header peek failed for {path}: {e}")
+        return None

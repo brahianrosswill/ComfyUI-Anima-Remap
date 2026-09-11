@@ -50,6 +50,9 @@ from .anima_common import (
     build_source_to_inserted_targets,
     get_model_block_count,
     AnimaBlockMismatchError,
+    compute_remap_settings_hash,
+    peek_lora_block_count,
+    resolve_manifest_filename,
 )
 
 logger = logging.getLogger("AnimaLoRARemap")
@@ -57,22 +60,45 @@ logger = logging.getLogger("AnimaLoRARemap")
 REMAP_SUFFIX = "_animaremap"
 
 
-def remap_cache_suffix(target_block_count):
+def remap_cache_suffix(target_block_count, settings_hash=None):
     """
-    The cache filename must encode WHICH target block count a cached remap
-    was made for -- e.g. "_animaremap40" vs "_animaremap52" -- not just
-    "_animaremap". Without this, swapping from a 40-block model to a
-    52-block model (with the same source LoRA) would silently reuse a
-    cache file that was remapped for the WRONG target, since a bare
-    per-name lookup can't tell the two apart.
+    The cache filename encodes WHICH target block count a cached remap was made
+    for -- e.g. "_animaremap40" vs "_animaremap52" -- so swapping from a
+    40-block model to a 52-block model can't silently reuse a cache remapped
+    for the wrong target.
+
+    `settings_hash` additionally encodes the manifest and extension settings the
+    cache was produced under (see compute_remap_settings_hash). Without it, a
+    cache made with one manifest/extend setting would keep being reused after
+    those settings changed, with no indication that the new settings were being
+    ignored. Omitting it yields the LEGACY suffix, which is only used to detect
+    and warn about pre-hash cache files.
     """
+    if settings_hash:
+        return f"{REMAP_SUFFIX}{target_block_count}_{settings_hash}"
     return f"{REMAP_SUFFIX}{target_block_count}"
 
 
-def get_remapped_sibling_path(original_path, target_block_count):
-    """Path for the cached remapped copy: same folder, same extension, target-specific suffix appended before it."""
+def get_remapped_sibling_path(original_path, target_block_count, settings_hash=None):
+    """Path for the cached remapped copy: same folder, same extension, target/settings-specific suffix appended before it."""
     base, ext = os.path.splitext(original_path)
-    return f"{base}{remap_cache_suffix(target_block_count)}{ext}"
+    return f"{base}{remap_cache_suffix(target_block_count, settings_hash)}{ext}"
+
+
+def warn_if_legacy_cache(name, target_block_count, suffix_fn=remap_cache_suffix):
+    """
+    Pre-hash cache files ("mylora_animaremap52") are deliberately NOT loaded:
+    there's no way to tell which manifest/extend settings produced them, which
+    is exactly the silent-staleness problem the hash was added to fix. Warn once
+    so the user knows the file is now dead weight.
+    """
+    legacy = resolve_lora_path(f"{name}{suffix_fn(target_block_count)}")
+    if legacy is not None:
+        logger.warning(
+            f"'{name}': ignoring legacy remap cache {os.path.basename(legacy)} "
+            f"(pre-hash format -- its manifest/extend settings are unknown). "
+            f"Delete it; a new cache will be written under the hashed name."
+        )
 
 
 def save_remapped_lora(path, tensors):
@@ -91,14 +117,50 @@ TAG_PATTERN = re.compile(r"<lora:([^:>]+):(-?[\d.]+)(?::(-?[\d.]+))?>")
 LORA_EXTENSIONS = [".safetensors", ".pt", ".ckpt", ".sft"]
 
 
+def _strip_lora_ext(name):
+    """
+    Remove a trailing LoRA extension, and ONLY a real one.
+
+    os.path.splitext() must not be used here: it strips everything after the
+    last dot, whatever that is. Two ways that bites us --
+      - a cache lookup name like "mylora.safetensors_animaremap40_a7f6b0"
+        would have ".safetensors_animaremap40_a7f6b0" stripped, leaving
+        "mylora", which then matches the ORIGINAL LoRA. The cache lookup
+        "succeeds" against the unremapped file and no remap is ever applied.
+      - a LoRA legitimately named "anima-rl-v0.1" would lose its ".1".
+    """
+    low = name.lower()
+    for ext in LORA_EXTENSIONS:
+        if low.endswith(ext):
+            return name[: -len(ext)]
+    return name
+
+
+def _normalize_lookup_name(name):
+    """
+    Windows-style separators -> POSIX, plus surrounding whitespace/slashes
+    stripped. ComfyUI's own LoRA dropdown shows relative paths using os.sep, so
+    on Windows a name copied straight out of it looks like
+    `style\\mylora.safetensors` -- which must resolve the same as a hand-typed
+    `style/mylora`.
+    """
+    return (name or "").replace("\\", "/").strip().strip("/")
+
+
 def resolve_lora_path(name):
     """
     Resolve a LoRA tag name to a full path, tolerating:
       - the extension being omitted (folder_paths.get_full_path needs it exact)
+      - the extension being INCLUDED for a file that lives in a subfolder
       - the file living in a subfolder of loras/ (matched by basename)
-      - case differences in the extension or basename
+      - a subfolder path being included, in any case, with either separator
+      - case differences anywhere in the name
     Returns None if nothing matches.
     """
+    name = _normalize_lookup_name(name)
+    if not name:
+        return None
+
     # 1. exact relative-path match (handles names that already include a subfolder/extension)
     path = folder_paths.get_full_path("loras", name)
     if path:
@@ -110,19 +172,74 @@ def resolve_lora_path(name):
         if path:
             return path
 
-    # 3. fall back to a basename search across every known lora file (any subfolder)
+    # 3. fall back to a search across every known lora file.
+    #    BOTH sides get normalised the same way before comparing. Previously only
+    #    the CANDIDATE had its folder and extension stripped while the user's
+    #    input was compared raw, so a name typed WITH its extension
+    #    ("mylora.safetensors" for a file inside a subfolder) or with a
+    #    differently-cased folder ("Style/mylora") could never match -- steps 1
+    #    and 2 don't cover those either, so the lookup failed outright.
     try:
         all_loras = folder_paths.get_filename_list("loras")
     except Exception:
         all_loras = []
 
-    target = name.lower()
+    target_rel = _strip_lora_ext(name).lower()
+    target_base = os.path.basename(target_rel)
+
+    base_matches = []
     for rel_path in all_loras:
-        base = os.path.splitext(os.path.basename(rel_path))[0]
-        if base.lower() == target:
+        rel_stem = _strip_lora_ext(_normalize_lookup_name(rel_path)).lower()
+        # a full relative path match is unambiguous -- prefer it outright
+        if rel_stem == target_rel:
             return folder_paths.get_full_path("loras", rel_path)
+        if os.path.basename(rel_stem) == target_base:
+            base_matches.append(rel_path)
+
+    if base_matches:
+        if len(base_matches) > 1:
+            shown = ", ".join(base_matches[:3])
+            more = ", ..." if len(base_matches) > 3 else ""
+            logger.warning(
+                f"'{name}': {len(base_matches)} LoRAs share this basename across subfolders "
+                f"({shown}{more}); using the first. Include the subfolder in the tag to "
+                f"pick a specific one."
+            )
+        return folder_paths.get_full_path("loras", base_matches[0])
 
     return None
+
+
+def lora_lookup_diagnostic(name):
+    """
+    Extra context appended to a "LoRA not found" warning.
+
+    Without it, the bare message reads as "the node can't see my loras folder",
+    which sends people chasing path/symlink problems when the real cause is
+    almost always a name that doesn't match. These two cases need completely
+    different fixes, so the warning should say which one it is.
+    """
+    try:
+        all_loras = folder_paths.get_filename_list("loras")
+    except Exception as e:
+        return f"could not list the loras folder at all ({e})"
+
+    if not all_loras:
+        try:
+            roots = folder_paths.get_folder_paths("loras")
+        except Exception:
+            roots = []
+        return (
+            "ComfyUI reports 0 LoRA files, so this is a folder/config problem rather than a "
+            f"name problem -- configured loras path(s): {roots or 'none'}"
+        )
+
+    sample = ", ".join(all_loras[:3])
+    return (
+        f"ComfyUI can see {len(all_loras)} LoRA file(s), so the folder is fine and it's the NAME "
+        f"that didn't match. Use the same relative path ComfyUI's own LoRA dropdown shows, "
+        f"e.g. {sample}"
+    )
 
 
 def parse_lora_tags(text, default_weight):
@@ -179,8 +296,8 @@ class AnimaLoRARemapTagLoader:
             },
         }
 
-    RETURN_TYPES = ("MODEL", "CLIP", "STRING")
-    RETURN_NAMES = ("model", "clip", "text")
+    RETURN_TYPES = ("MODEL", "CLIP", "STRING", "STRING")
+    RETURN_NAMES = ("model", "clip", "text", "remap_info")
     FUNCTION = "load"
     CATEGORY = "loaders/anima"
 
@@ -190,6 +307,7 @@ class AnimaLoRARemapTagLoader:
 
         out_model = model
         out_clip = clip
+        remap_info_lines = []
 
         # Same for every tag this run; the MANIFEST itself is resolved per
         # tag below, since different LoRAs can be from different Anima
@@ -203,26 +321,42 @@ class AnimaLoRARemapTagLoader:
             if original_path is None:
                 logger.warning(
                     f"LoRA not found in loras folder (tried exact name, common "
-                    f"extensions, and a subfolder basename search): {name}"
+                    f"extensions, and a subfolder basename search): {name} -- "
+                    f"{lora_lookup_diagnostic(name)}"
                 )
                 continue
 
-            # The cache is keyed by (name, target_block_count) -- not just
-            # name -- so it can't be reused across a different connected
-            # model's block count.
+            # The cache is keyed by (name, target_block_count, settings_hash).
+            # The hash needs the RESOLVED manifest, which needs this LoRA's own
+            # block count -- read from the safetensors header only, so working
+            # out which cache file to look for doesn't cost a full file load
+            # (which would defeat the point of the cache).
             cached_path = None
+            settings_hash = None
+            cache_stem = _strip_lora_ext(os.path.basename(_normalize_lookup_name(original_path)))
             if auto_remap and model_block_count is not None:
-                cached_path = resolve_lora_path(f"{name}{remap_cache_suffix(model_block_count)}")
+                peeked = peek_lora_block_count(original_path)
+                manifest_name = resolve_manifest_filename(manifest, peeked, model_block_count)
+                if manifest_name:
+                    settings_hash = compute_remap_settings_hash(
+                        manifest_name, model_block_count,
+                        extend_to_new_layers, extend_strength,
+                    )
+                    # Built from the RESOLVED path, never from the raw tag text:
+                    # the tag may carry a subfolder and/or an extension, and
+                    # gluing a suffix onto that produces a name no lookup should
+                    # ever have to un-pick.
+                    cached_path = resolve_lora_path(
+                        f"{cache_stem}{remap_cache_suffix(model_block_count, settings_hash)}"
+                    )
+                if cached_path is None:
+                    warn_if_legacy_cache(cache_stem, model_block_count)
 
             if cached_path is not None:
                 lora_sd = comfy.utils.load_torch_file(cached_path, safe_load=True)
                 logger.info(f"'{name}': using cached remap file {os.path.basename(cached_path)}")
-                logger.info(
-                    f"'{name}': NOTE -- this cache reflects whatever manifest/extend_to_new_layers/"
-                    f"extend_strength were set to when it was saved for the {model_block_count}-block "
-                    f"target, not the current node settings (manifest={manifest}, "
-                    f"extend_to_new_layers={extend_to_new_layers}, extend_strength={extend_strength}). "
-                    f"Delete {os.path.basename(cached_path)} and re-run if you've changed these."
+                remap_info_lines.append(
+                    f"{name}: cache hit ({os.path.basename(cached_path)}), target={model_block_count}"
                 )
             else:
                 lora_sd = comfy.utils.load_torch_file(original_path, safe_load=True)
@@ -235,6 +369,7 @@ class AnimaLoRARemapTagLoader:
                 )
 
                 if needs_remap:
+                    manifest_used = resolve_manifest_filename(manifest, lora_block_count, model_block_count)
                     manifest_data = resolve_manifest(manifest, lora_block_count, model_block_count)
                     base_to_target = build_base_to_target(manifest_data) if manifest_data else {}
                     source_to_inserted = build_source_to_inserted_targets(manifest_data) if manifest_data else {}
@@ -252,6 +387,10 @@ class AnimaLoRARemapTagLoader:
                             f"'{name}': remapped {lora_block_count}->{model_block_count} blocks "
                             f"({len(remapped)} tensors kept, {dropped} dropped as "
                             f"newly-inserted layers with no old counterpart)"
+                        )
+                        remap_info_lines.append(
+                            f"{name}: {lora_block_count}->{model_block_count} via "
+                            f"{manifest_used}, {len(remapped)} keys kept, {dropped} dropped"
                         )
 
                         if extend_to_new_layers and source_to_inserted:
@@ -274,11 +413,21 @@ class AnimaLoRARemapTagLoader:
                                 f"newly-inserted layers via nearest-neighbor copy "
                                 f"(strength={extend_strength})"
                             )
+                            remap_info_lines.append(
+                                f"{name}: extended {extended} tensors onto new layers "
+                                f"(strength={extend_strength})"
+                            )
 
                         lora_sd = remapped
 
                         if save_remapped:
-                            remapped_path = get_remapped_sibling_path(original_path, model_block_count)
+                            remapped_path = get_remapped_sibling_path(
+                                original_path, model_block_count,
+                                settings_hash or compute_remap_settings_hash(
+                                    manifest_used, model_block_count,
+                                    extend_to_new_layers, extend_strength,
+                                ),
+                            )
                             if os.path.exists(remapped_path):
                                 logger.info(
                                     f"'{name}': remap cache already exists, skipping save: "
@@ -297,8 +446,14 @@ class AnimaLoRARemapTagLoader:
                             f"'{name}': no manifest available for {lora_block_count}->{model_block_count} "
                             f"blocks, applied as-is"
                         )
+                        remap_info_lines.append(
+                            f"{name}: no manifest for {lora_block_count}->{model_block_count}, applied as-is"
+                        )
                 else:
                     logger.info(f"'{name}': applied as-is (remap not needed/enabled)")
+                    remap_info_lines.append(
+                        f"{name}: applied as-is (blocks={lora_block_count}, model={model_block_count})"
+                    )
 
             # A LoRA that references more blocks than the connected model has
             # cannot be remapped DOWN -- there's nowhere for its high-index
@@ -321,7 +476,7 @@ class AnimaLoRARemapTagLoader:
                 out_model, out_clip, lora_sd, w_model_final, w_clip_final
             )
 
-        return (out_model, out_clip, stripped_text)
+        return (out_model, out_clip, stripped_text, "\n".join(remap_info_lines))
 
 
 NODE_CLASS_MAPPINGS = {

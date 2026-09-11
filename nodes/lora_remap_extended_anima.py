@@ -35,11 +35,18 @@ from .anima_common import (
     build_insertion_neighbors,
     get_model_block_count,
     AnimaBlockMismatchError,
+    compute_remap_settings_hash,
+    peek_lora_block_count,
+    resolve_manifest_filename,
 )
 from .lora_remap_anima import (
     resolve_lora_path,
     save_remapped_lora,
     parse_lora_tags,
+    warn_if_legacy_cache,
+    lora_lookup_diagnostic,
+    _strip_lora_ext,
+    _normalize_lookup_name,
 )
 
 logger = logging.getLogger("AnimaLoRARemapExtended")
@@ -47,16 +54,21 @@ logger = logging.getLogger("AnimaLoRARemapExtended")
 REMAP_SUFFIX_EXT = "_animaremap"
 
 
-def remap_cache_suffix_ext(target_block_count):
-    """Same reasoning as remap_cache_suffix() in lora_remap_anima.py: the
-    cache filename must encode the TARGET block count, e.g. "_animaremap52_ext",
-    so it can't be reused across a different connected model's block count."""
+def remap_cache_suffix_ext(target_block_count, settings_hash=None):
+    """Same reasoning as remap_cache_suffix() in lora_remap_anima.py, plus the
+    settings hash (see compute_remap_settings_hash) so a cache made under one
+    manifest/blend_ratio/extend_strength combination is never silently reused
+    after those change. Omitting the hash yields the LEGACY suffix, used only to
+    detect and warn about pre-hash cache files."""
+    if settings_hash:
+        return f"{REMAP_SUFFIX_EXT}{target_block_count}_ext_{settings_hash}"
     return f"{REMAP_SUFFIX_EXT}{target_block_count}_ext"
 
 
-def get_remapped_sibling_path_ext(original_path, target_block_count):
+def get_remapped_sibling_path_ext(original_path, target_block_count, settings_hash=None):
+    """Path for the cached extended-remap copy: same folder, same extension."""
     base, ext = os.path.splitext(original_path)
-    return f"{base}{remap_cache_suffix_ext(target_block_count)}{ext}"
+    return f"{base}{remap_cache_suffix_ext(target_block_count, settings_hash)}{ext}"
 
 
 def group_by_base_index(lora_sd):
@@ -139,8 +151,8 @@ class AnimaLoRARemapExtendedTagLoader:
             },
         }
 
-    RETURN_TYPES = ("MODEL", "CLIP", "STRING")
-    RETURN_NAMES = ("model", "clip", "text")
+    RETURN_TYPES = ("MODEL", "CLIP", "STRING", "STRING")
+    RETURN_NAMES = ("model", "clip", "text", "remap_info")
     FUNCTION = "load"
     CATEGORY = "loaders/anima/experimental"
 
@@ -150,6 +162,7 @@ class AnimaLoRARemapExtendedTagLoader:
 
         out_model = model
         out_clip = clip
+        remap_info_lines = []
 
         # Same for every tag this run; the manifest itself is resolved per
         # tag below (a mixed prompt can reference LoRAs from different
@@ -162,24 +175,39 @@ class AnimaLoRARemapExtendedTagLoader:
             if original_path is None:
                 logger.warning(
                     f"LoRA not found in loras folder (tried exact name, common "
-                    f"extensions, and a subfolder basename search): {name}"
+                    f"extensions, and a subfolder basename search): {name} -- "
+                    f"{lora_lookup_diagnostic(name)}"
                 )
                 continue
 
-            # The cache is keyed by (name, target_block_count) so it can't
-            # be reused across a different connected model's block count.
+            # The cache is keyed by (name, target_block_count, settings_hash).
+            # The hash needs the RESOLVED manifest, which needs this LoRA's own
+            # block count -- read from the safetensors header only, so picking
+            # the cache filename doesn't cost a full file load.
             cached_path = None
+            settings_hash = None
+            cache_stem = _strip_lora_ext(os.path.basename(_normalize_lookup_name(original_path)))
             if auto_remap and model_block_count is not None:
-                cached_path = resolve_lora_path(f"{name}{remap_cache_suffix_ext(model_block_count)}")
+                peeked = peek_lora_block_count(original_path)
+                manifest_name = resolve_manifest_filename(manifest, peeked, model_block_count)
+                if manifest_name:
+                    settings_hash = compute_remap_settings_hash(
+                        manifest_name, model_block_count,
+                        extend_to_new_layers, extend_strength,
+                        blend_ratio=blend_ratio, extended_node=True,
+                    )
+                    # Built from the RESOLVED path, never from the raw tag text.
+                    cached_path = resolve_lora_path(
+                        f"{cache_stem}{remap_cache_suffix_ext(model_block_count, settings_hash)}"
+                    )
+                if cached_path is None:
+                    warn_if_legacy_cache(cache_stem, model_block_count, remap_cache_suffix_ext)
 
             if cached_path is not None:
                 lora_sd = comfy.utils.load_torch_file(cached_path, safe_load=True)
                 logger.info(f"'{name}': using cached extended-remap file {cached_path}")
-                logger.info(
-                    f"'{name}': NOTE -- this cache reflects whatever manifest/extend_to_new_layers/"
-                    f"blend_ratio/extend_strength were set to when it was saved for the "
-                    f"{model_block_count}-block target, not the current node settings. Delete the "
-                    f"file and re-run if you've changed any of these."
+                remap_info_lines.append(
+                    f"{name}: cache hit ({os.path.basename(cached_path)}), target={model_block_count}"
                 )
             else:
                 lora_sd = comfy.utils.load_torch_file(original_path, safe_load=True)
@@ -192,6 +220,7 @@ class AnimaLoRARemapExtendedTagLoader:
                 )
 
                 if needs_remap:
+                    manifest_used = resolve_manifest_filename(manifest, lora_block_count, model_block_count)
                     manifest_data = resolve_manifest(manifest, lora_block_count, model_block_count)
                     base_to_target = build_base_to_target(manifest_data) if manifest_data else {}
                     neighbors = build_insertion_neighbors(manifest_data) if manifest_data else {}
@@ -210,6 +239,10 @@ class AnimaLoRARemapExtendedTagLoader:
                             f"({len(remapped)} tensors kept, {dropped} dropped as "
                             f"newly-inserted layers with no old counterpart)"
                         )
+                        remap_info_lines.append(
+                            f"{name}: {lora_block_count}->{model_block_count} via "
+                            f"{manifest_used}, {len(remapped)} keys kept, {dropped} dropped"
+                        )
 
                         if extend_to_new_layers and neighbors:
                             groups = group_by_base_index(lora_sd)
@@ -221,11 +254,22 @@ class AnimaLoRARemapExtendedTagLoader:
                                 f"newly-inserted layers via front/back blend "
                                 f"(blend_ratio={blend_ratio}, extend_strength={extend_strength})"
                             )
+                            remap_info_lines.append(
+                                f"{name}: extended {len(extension)} tensors (blend_ratio={blend_ratio}, "
+                                f"strength={extend_strength})"
+                            )
 
                         lora_sd = remapped
 
                         if save_remapped:
-                            remapped_path = get_remapped_sibling_path_ext(original_path, model_block_count)
+                            remapped_path = get_remapped_sibling_path_ext(
+                                original_path, model_block_count,
+                                settings_hash or compute_remap_settings_hash(
+                                    manifest_used, model_block_count,
+                                    extend_to_new_layers, extend_strength,
+                                    blend_ratio=blend_ratio, extended_node=True,
+                                ),
+                            )
                             if os.path.exists(remapped_path):
                                 logger.info(f"'{name}': extended-remap cache already exists, skipping save")
                             else:
@@ -239,8 +283,14 @@ class AnimaLoRARemapExtendedTagLoader:
                             f"'{name}': no manifest available for {lora_block_count}->{model_block_count} "
                             f"blocks, applied as-is"
                         )
+                        remap_info_lines.append(
+                            f"{name}: no manifest for {lora_block_count}->{model_block_count}, applied as-is"
+                        )
                 else:
                     logger.info(f"'{name}': applied as-is (remap not needed/enabled)")
+                    remap_info_lines.append(
+                        f"{name}: applied as-is (blocks={lora_block_count}, model={model_block_count})"
+                    )
 
             # A LoRA that references more blocks than the connected model has
             # cannot be remapped DOWN -- there's nowhere for its high-index
@@ -263,7 +313,7 @@ class AnimaLoRARemapExtendedTagLoader:
                 out_model, out_clip, lora_sd, w_model_final, w_clip_final
             )
 
-        return (out_model, out_clip, stripped_text)
+        return (out_model, out_clip, stripped_text, "\n".join(remap_info_lines))
 
 
 NODE_CLASS_MAPPINGS = {
