@@ -76,7 +76,8 @@ git clone https://github.com/shin131002/ComfyUI-Anima-Remap.git
 
 `<lora:名前:重み>`というタグ構文をプロンプト文字列から解析してLoRAを適用する、LoRA Tag Power Loader系ノードと同じ使い勝手のローダーです。タグごとに、そのLoRA自身のブロック数と接続されたモデルのブロック数を検出し、両者が異なる場合は自動でキー名をリマップしてから適用します。
 
-![ノード1: Anima LoRA Tag Loader (Auto Remap)](./images/01.jpg)
+<!-- ノード1: Anima LoRA Tag Loader (Auto Remap) -->
+<img src="./images/01.jpg" width="50%">
 
 ### 入力
 
@@ -130,7 +131,9 @@ git clone https://github.com/shin131002/ComfyUI-Anima-Remap.git
 
 ### LoRA名の入力補完
 
-![LoRA名の入力補完](./images/07.jpg)
+<!-- LoRA名の入力補完 -->
+<img src="./images/07.jpg" width="50%">
+
 
 ノード1・3(Tag Loaderの通常版とExtended版)のtext欄に直接入力している間、LoRAのファイル名を補完できます。
 
@@ -149,7 +152,8 @@ aaa  →  候補から aaabbb を選択  →  <lora:aaabbb:1>, ccc
 - `_animaremap*`キャッシュファイルは候補に出ません
 - **text欄に前段のノードを接続している場合は動作しません**(入力欄が無いため)。接続時の動作は従来通りです
 
-![外部入力例](./images/08.jpg)
+<!-- 外部入力例 -->
+<img src="./images/08.jpg" width="50%">
 
 
 #### トリガーワードの取得元
@@ -270,7 +274,9 @@ LoRAと同じフォルダにある以下のファイルを、この順で探し�
 
 2つのAnimaモデル(MODEL)を、レイヤー構造の違いを自動吸収しながらマージします。どの2世代の組み合わせでも対応します。
 
-![ノード2: Anima Model Merge (Auto Remap)](./images/02.jpg)
+<!-- ノード2: Anima Model Merge (Auto Remap) -->
+<img src="./images/02.jpg" width="50%">
+
 
 ### 入力
 
@@ -336,9 +342,12 @@ LoRAと同じフォルダにある以下のファイルを、この順で探し�
 
 `Anima LoRA Tag Loader Extended (Experimental)`と`Anima Model Merge Extended (Experimental)`は、通常版のノード(ノード1・2)を一切変更せず、**別ファイル・別ノードとして追加した実験的なバリエーション**です。通常版はこれまで通りの動作のまま安心して使い続けられます。
 
-![ノード3: Anima LoRA Tag Loader Extended (Experimental)](./images/03.jpg)
+<!-- ノード3: Anima LoRA Tag Loader Extended (Experimental) -->
+<img src="./images/03.jpg" width="50%">
 
-![ノード4: Anima Model Merge Extended (Experimental)](./images/04.jpg)
+<!-- ノード4: Anima Model Merge Extended (Experimental) -->
+<img src="./images/04.jpg" width="50%">
+
 
 ### 何が拡張されているか
 
@@ -375,9 +384,12 @@ LoRA Extended版のキャッシュファイルは、Extended版であること�
 
 [shin131002/RandomLoRALoader](https://github.com/shin131002/RandomLoRALoader)の「Random LoRA Loader」(3フォルダ同時選択)と「Filtered Random LoRA Loader」(1フォルダ+キーワードフィルタ)をAnima専用に移植したノードです。ノード1〜4と同じ自動リマップ機構をそのまま内蔵しており、ランダムに選ばれたLoRAごとに必要であれば自動でリマップしてから適用します。タグを手打ちする必要はありません。
 
-![ノード5: Anima Random LoRA Loader (28/40/52 Auto)](./images/05.jpg)
+<!-- ノード5: Anima Random LoRA Loader (28/40/52 Auto) -->
+<img src="./images/05.jpg" width="50%">
 
-![ノード6: Anima Filtered Random LoRA Loader (28/40/52 Auto)](./images/06.jpg)
+<!-- ノード6: Anima Filtered Random LoRA Loader (28/40/52 Auto) -->
+<img src="./images/06.jpg" width="50%">
+
 
 **Anima Random LoRA Loader**は最大3フォルダ(例: スタイル/キャラクター/コンセプト)から同時に選択し、フォルダごとに強度範囲・選択数を設定できます。**Anima Filtered Random LoRA Loader**は単一フォルダ+キーワードフィルタ(AND/OR、フレーズ一致、メタデータ検索オプション)構成で、大規模で雑多なLoRAコレクションに向いています。
 

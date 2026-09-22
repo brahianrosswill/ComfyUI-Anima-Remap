@@ -76,7 +76,9 @@ After restarting, search for "Anima" in the node search (double-click the canvas
 
 A LoRA loader with the same `<lora:name:weight>` tag syntax used by LoRA Tag Power Loader-style nodes, parsed out of a prompt string. For each LoRA tag, it detects both that LoRA's own block count and the connected model's block count, and — if they differ — automatically remaps the LoRA's keys onto the model's generation before applying it.
 
-![Node 1: Anima LoRA Tag Loader (Auto Remap)](./images/01.jpg)
+<!-- Node 1: Anima LoRA Tag Loader (Auto Remap) -->
+<img src="./images/01.jpg" width="50%">
+
 
 ### Inputs
 
@@ -130,7 +132,9 @@ When a name can't be matched at all, the warning says whether ComfyUI can see yo
 
 ### LoRA name autocomplete
 
-![LoRA name autocomplete](./images/07.jpg)
+<!-- LoRA name autocomplete -->
+<img src="./images/07.jpg" width="50%">
+
 
 While typing directly into the text box of Nodes 1 & 3 (the regular and Extended Tag Loaders), LoRA filenames can be autocompleted.
 
@@ -149,7 +153,9 @@ aaa  →  pick aaabbb from the list  →  <lora:aaabbb:1>, ccc
 - `_animaremap*` cache files never appear as candidates
 - **It does not work when the text box is fed from an upstream node** (there is no text box to type into). Connected behaviour is unchanged
 
-![Connecting text from an upstream node](./images/08.jpg)
+<!-- Connecting text from an upstream node -->
+<img src="./images/08.jpg" width="50%">
+
 
 #### Where trigger words come from
 
@@ -269,7 +275,9 @@ The text below described how the cache worked before filenames included a settin
 
 Merges two Anima models (MODEL), automatically reconciling any difference in block/layer structure between them — regardless of which two generations they're from.
 
-![Node 2: Anima Model Merge (Auto Remap)](./images/02.jpg)
+<!-- Node 2: Anima Model Merge (Auto Remap) -->
+<img src="./images/02.jpg" width="50%">
+
 
 ### Inputs
 
@@ -335,9 +343,12 @@ This node has no built-in save functionality. To save the merge result, connect 
 
 `Anima LoRA Tag Loader Extended (Experimental)` and `Anima Model Merge Extended (Experimental)` are **separate files and separate nodes**, added without changing the regular nodes (1 & 2) at all. The regular nodes keep working exactly as before.
 
-![Node 3: Anima LoRA Tag Loader Extended (Experimental)](./images/03.jpg)
+<!-- Node 3: Anima LoRA Tag Loader Extended (Experimental) -->
+<img src="./images/03.jpg" width="50%">
 
-![Node 4: Anima Model Merge Extended (Experimental)](./images/04.jpg)
+<!-- Node 4: Anima Model Merge Extended (Experimental) -->
+<img src="./images/04.jpg" width="50%">
+
 
 ### What's extended
 
@@ -374,9 +385,12 @@ These are purely for experimentation. Reach for them if you want finer control o
 
 Anima-only ports of [shin131002/RandomLoRALoader](https://github.com/shin131002/RandomLoRALoader)'s "Random LoRA Loader" (3-folder simultaneous selection) and "Filtered Random LoRA Loader" (1 folder + keyword filter), with the same auto-remap logic as Nodes 1–4 built directly in. Every randomly-selected LoRA is checked and, if needed, remapped before being applied — no manual tagging required.
 
-![Node 5: Anima Random LoRA Loader (28/40/52 Auto)](./images/05.jpg)
+<!-- Node 5: Anima Random LoRA Loader (28/40/52 Auto) -->
+<img src="./images/05.jpg" width="50%">
 
-![Node 6: Anima Filtered Random LoRA Loader (28/40/52 Auto)](./images/06.jpg)
+<!-- Node 6: Anima Filtered Random LoRA Loader (28/40/52 Auto) -->
+<img src="./images/06.jpg" width="50%">
+
 
 **Anima Random LoRA Loader** selects LoRAs from up to 3 folders at once (e.g. style / character / concept), each with its own strength range and count. **Anima Filtered Random LoRA Loader** selects from a single folder with keyword filtering (AND/OR, phrase matching, optional metadata search) — better suited to a large, mixed LoRA collection.
 
