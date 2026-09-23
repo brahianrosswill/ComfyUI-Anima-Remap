@@ -4,7 +4,7 @@
 
 > **Note (Anima-3.8B v1.1+):** Some Anima checkpoints ship the Qwen3.5 4B cross-attention component (the `semantic_attentions.*` / connector keys) bundled inside the same file as the DiT, rather than as a separate adapter file — this changed with Anima-3.8B v1.1's "Semantic Connector v2". Regardless of which way it's packaged, this component is never touched by remapping: detection and remapping only ever look at `net.blocks.N` keys, and the connector's keys don't match that pattern. Confirmed working: Qwen3.5 can be left disconnected entirely and generation still works via the native Qwen3 0.6B path. See "About Anima-3.8B (52 blocks) support" below.
 
-A ComfyUI custom node package for applying LoRAs and merging models across the Anima model family (original Anima/28 blocks, Anima-2.9B/40 blocks, Anima-3.8B/52 blocks — and whatever comes next), automatically accounting for the difference in block/layer structure between whichever two generations you're working with. Also includes Anima-specific random LoRA loaders (folder-based, with the same auto-remap logic built in).
+A ComfyUI custom node package for applying LoRAs and merging models across the Anima model family (original Anima/28 blocks, Anima-2.9B/40 blocks, Anima-3.8B/52 blocks — and whatever comes next), automatically accounting for the difference in block/layer structure between whichever two generations you're working with. Also includes Anima-specific random LoRA loaders (folder-based, with the same auto-remap logic built in), and nodes that let ControlNets trained for the 28-block base (LLLite and VACE types) work correctly on 40- and 52-block models.
 
 This is the successor to [ComfyUI-Anima29B-Remap](https://github.com/shin131002/ComfyUI-Anima29B-Remap), which is no longer updated. Node IDs are unchanged, so existing workflows built against that repository keep loading here without modification.
 
@@ -39,7 +39,14 @@ ComfyUI-Anima-Remap/
 │   ├── model_merge_anima.py                 # Model merge (auto remap)
 │   ├── model_merge_extended_anima.py        # Model merge, extended (experimental, front/back blend)
 │   ├── anima_random_lora_loader.py          # Random LoRA loader, 3 folders (auto remap)
-│   └── anima_filtered_random_lora_loader.py # Random LoRA loader, 1 folder + keyword filter (auto remap)
+│   ├── anima_filtered_random_lora_loader.py # Random LoRA loader, 1 folder + keyword filter (auto remap)
+│   ├── lllite_remap_anima.py                # ControlNet-LLLite apply node (auto remap; modified from kohya-ss's nodes.py, Apache 2.0)
+│   ├── lllite_block_remap.py                # Block-index remapping for LLLite weights
+│   ├── vace_controlnet_remap_anima.py       # Injection-point remap node for VACE-type ControlNets
+│   └── lllite_vendor/                       # Code taken from kohya-ss/ComfyUI-Anima-LLLite (Apache 2.0)
+│       ├── __init__.py                      # (empty, makes this a proper package)
+│       ├── control_net_lllite_anima.py      # LLLite implementation (changes documented at the top of the file)
+│       └── LICENSE-Apache-2.0               # License of the vendored code
 └── web/
     └── anima_lora_autocomplete.js           # Frontend for LoRA name autocomplete (text box of Nodes 1 & 3)
 ```
@@ -218,6 +225,8 @@ Two normalisation rules keep the number of files down:
 > ⚠️ **Caution: `save_remapped` ON + repeated setting changes = a growing pile of cache files.**
 >
 > Each distinct combination of settings now produces its own file, and **nothing is ever deleted automatically**. Leaving `save_remapped` ON while you tune settings run after run will quietly fill your LoRA folder with `_animaremap<N>_<hash>` files — one per combination you tried, each roughly the size of the original LoRA.
+>
+> One exception to that size: for a LoRA **saved in fp8** with `extend_to_new_layers` also ON, the extension onto the new layers is stored in float32, so the cache file ends up larger than the original. PyTorch implements almost no fp8 arithmetic on the CPU, so the extension has to be computed in float32 (loading and applying the file are unaffected).
 >
 > This is why `save_remapped` still defaults to **OFF**, and why the recommended workflow is unchanged: experiment with `save_remapped` OFF, then turn it ON for a single run once you've settled on your settings. Sweep through the folder and delete the `_animaremap*` files you don't want to keep whenever they build up.
 
@@ -447,6 +456,140 @@ Same shape as the original RandomLoRALoader nodes: `MODEL`, `CLIP`, `positive_te
 
 ---
 
+## Node 7: Apply Anima ControlNet-LLLite (Auto Remap)
+
+The "Apply Anima ControlNet-LLLite (sd-scripts)" node from [kohya-ss/ComfyUI-Anima-LLLite](https://github.com/kohya-ss/ComfyUI-Anima-LLLite), brought in and extended so it works on any 28/40/52-block model. Upstream stops with a `depth_embed slices missing` error when weights trained on Anima-Base (28 blocks) are used on a 40+ block model; this node renumbers the blocks in the weights to match the connected model before loading them.
+
+<!-- Node 7: Apply Anima ControlNet-LLLite (Auto Remap) -->
+<img src="./images/09.jpg">
+
+- You don't need kohya-ss's package installed (the required code is bundled)
+- The node ID is different, so it can coexist with upstream's node and with ComfyUI's built-in "Apply Anima ControlNet-LLLite" node
+- On a 28-block model it behaves exactly like upstream
+- Weight files go in `models/controlnet`, same as upstream
+
+### Inputs
+
+| Name | Type | Description |
+|---|---|---|
+| `model` | MODEL | The Anima model to apply it to (28/40/52 blocks) |
+| `lllite_name` | dropdown | LLLite weight file in `models/controlnet` |
+| `image` | IMAGE | Conditioning image (lineart, depth map, etc.) |
+| `strength` | FLOAT | How strongly it applies (-10 to 10, default 1.0) |
+| `start_percent` / `end_percent` | FLOAT | Step range the control is applied over (0.0 to 1.0) |
+| `auto_remap` | BOOLEAN | Renumber blocks when the weights and the connected model have different block counts (default ON) |
+| `manifest` | dropdown | `Auto (Recommended)` (default) picks automatically from the block-count pair. Selecting a specific file forces that one |
+| `extend_to_new_layers` | BOOLEAN | Also apply control on the newly-inserted blocks (default OFF, see below) |
+| `extend_strength` | FLOAT | Strength of the control on newly-inserted blocks (0 to 2, default 0.5) |
+| `preserve_wrapper` | BOOLEAN | Chain onto a model wrapper installed by an earlier node instead of overwriting it (default ON). Leave ON when stacking several of these nodes |
+| `mask` *(optional)* | MASK | Required only for 4-channel (inpaint) weights. White = area to repaint, black = keep |
+
+### Outputs
+
+| Name | Type | Description |
+|---|---|---|
+| `model` | MODEL | The model with LLLite applied |
+| `remap_info` | STRING | The detected block counts and what was done (e.g. `28->40 via expand_manifest_28_40.json, 84 tensors remapped, 0 dropped`) |
+
+### Behaviour on a model with a different block count
+
+- **Upward (28-block weights on a 40/52-block model)**: each trained module is moved to the block it corresponds to. Newly-inserted blocks (12 of them for 28→40) have no trained counterpart, so by default nothing is applied there. LLLite modules have their final layer zero-initialised, so a module whose weights were never loaded outputs exactly zero — it has no effect on the image
+- **With `extend_to_new_layers` ON**: each new block gets a whole copy of the module from the original block immediately before it. Anima's new blocks were created by copying their predecessor when the model was expanded, so the module trained for that predecessor is the closest match. Averaging the weights of two neighbouring blocks is deliberately not used: an LLLite correction is a product of low-rank factors, and averaging factors from two different modules doesn't produce a meaningful correction. `extend_strength` scales only the final layer, so a copied module's effect is scaled by exactly that factor
+- **Downward (40-block weights on a 28-block model)**: the weights for the inserted blocks have nowhere to go and are dropped
+- A block-count pair with no matching manifest stops the node rather than putting weights in the wrong place
+- With `auto_remap` OFF on a model with a different block count, it runs without an error but the weights land on blocks that don't correspond. This is reported in a warning log and in `remap_info`
+
+### Stacking nodes
+
+Each node does nothing outside its own `start_percent`–`end_percent` range, so two nodes using the same weights with offset ranges let you change strength partway through sampling (keep `preserve_wrapper` ON).
+
+```
+[model] → [LLLite A] → [LLLite B] → KSampler
+
+A: strength 1.5–2.0  start 0.0  end 0.4   ← lock in the composition firmly
+B: strength 0.5–0.8  start 0.4  end 1.0   ← keep a light hold so it isn't pulled back later
+```
+
+Raising strength with `end_percent` at 1.0 tends to break fine detail late in sampling, while lowering `end_percent` tends to let the prompt pull the image back once control stops. Stacking lets you tune those two problems separately. The numbers are starting points.
+
+### About effectiveness
+
+As the name suggests, LLLite is a lightweight method, and it constrains the image less than a conventional ControlNet. The published sample weights only add a correction to the query of each block's self-attention, so the prompt's influence isn't reduced, and a prompt or LoRA that contradicts the conditioning image tends to win. If the effect is too weak, try raising `strength`, lowering CFG, or removing contradicting prompt terms. For a stronger constraint, consider a VACE-type ControlNet with Node 8.
+
+### Changes from upstream
+
+The only change to the vendored `control_net_lllite_anima.py` is that a module missing its `depth_embed` is zero-filled instead of raising an error; this is documented at the top of the file. Apart from renumbering blocks at load time and the added inputs/outputs, the node itself is upstream's — conditioning-image preprocessing, step-range control, wrapper handling and the inpaint path are all unchanged.
+
+## Node 8: Anima VACE ControlNet Remap
+
+A conversion node that makes VACE-type ControlNets (the conventional type, see below) work correctly on 40- and 52-block models. Loading and applying the ControlNet is done by a fork of [ComfyUI-Advanced-ControlNet](https://github.com/Kosinkadink/ComfyUI-Advanced-ControlNet); this node sits between those two steps and changes only where the ControlNet injects.
+
+<!-- Node 8: Anima VACE ControlNet Remap -->
+<img src="./images/10.jpg">
+
+### Why it's needed
+
+A VACE-type ControlNet runs a small separate network (the control branch) over the conditioning image and adds its outputs onto the outputs of specific blocks of the Anima model. The currently published models were trained on the 28-block Anima-Base, and they inject at blocks 0, 7, 14 and 21.
+
+On a 40- or 52-block model the loader **injects at blocks 0, 7, 14 and 21 anyway, without any error**. Once blocks have been inserted, those numbers point at physically different blocks, so the control goes in at the wrong depth and ends up weaker or less stable. This node uses the manifests to move the injection points to the right blocks.
+
+| Connected model | Injection blocks |
+|---|---|
+| 28 blocks (Anima-Base) | 0, 7, 14, 21 (unchanged) |
+| 40 blocks (Anima-2.9B) | 0, 10, 20, 31 |
+| 52 blocks (Anima-3.8B) | 0, 13, 26, 41 |
+
+### Prerequisites
+
+- **A fork of ComfyUI-Advanced-ControlNet**: the [`fix/anima-vace-hardening`](https://github.com/PineCookie/ComfyUI-Advanced-ControlNet/tree/fix/anima-vace-hardening) branch by PineCookie. It can load VACE-type ControlNets, and it also fixes a bug where an interrupted generation leaves the control attached so later images degrade into noise. If the original ComfyUI-Advanced-ControlNet is installed, disable it by renaming its folder to `ComfyUI-Advanced-ControlNet.disabled`, then run the following in `custom_nodes`:
+  ```
+  git clone -b fix/anima-vace-hardening https://github.com/PineCookie/ComfyUI-Advanced-ControlNet.git
+  ```
+- **A VACE-type ControlNet model** (placed in `models/controlnet`)
+  - Depth: [TaihoC/Anima-ControlNet-VACE-Depth](https://huggingface.co/TaihoC/Anima-ControlNet-VACE-Depth)
+  - Canny: [khanghy1000/Anima-ControlNet-VACE-Canny](https://huggingface.co/khanghy1000/Anima-ControlNet-VACE-Canny)
+
+This node doesn't import any of the fork's code, so Anima-Remap loads normally even without the fork installed. The fork is only needed when you use this node.
+
+### Example wiring
+
+```
+[Load Advanced ControlNet Model] ─CONTROL_NET→ [Anima VACE ControlNet Remap] ─→ [Apply Advanced ControlNet]
+[model loader] ────────────────MODEL──────────↗
+```
+
+- Load the ControlNet with the **Load Advanced ControlNet Model** node whose name ends in 🛂🅐🅒🅝 (ComfyUI's built-in "Load ControlNet Model" and the "ControlNet++ Loader" can't recognise the VACE type)
+- Feed `model` the same model you connect to your KSampler
+
+### Inputs
+
+| Name | Type | Description |
+|---|---|---|
+| `control_net` | CONTROL_NET | A VACE-type ControlNet loaded with Load Advanced ControlNet Model |
+| `model` | MODEL | The Anima model it will be applied to (used to detect the block count) |
+| `auto_remap` | BOOLEAN | Move the injection points when the block counts differ (default ON) |
+| `manifest` | dropdown | `Auto (Recommended)` (default) picks automatically from the block-count pair. Selecting a specific file forces that one |
+
+### Outputs
+
+| Name | Type | Description |
+|---|---|---|
+| `control_net` | CONTROL_NET | The ControlNet with its injection points moved (to Apply Advanced ControlNet) |
+| `remap_info` | STRING | What was done (e.g. `28->40 via expand_manifest_28_40.json, injection blocks [0, 7, 14, 21] -> [0, 10, 20, 31]`) |
+
+### Details
+
+- The injection points aren't hardcoded as 0, 7, 14, 21 — they're read from the loaded ControlNet. If VACE models with a different number or spacing of control blocks are published later, they're handled the same way
+- Only the injection block numbers are changed; the control branch's computation and weights are untouched. Nothing is duplicated in memory, and the loader's cached ControlNet is never modified, so switching between 28- and 40-block models always converts correctly
+- A 28-block ControlNet on a 28-block model is passed through unchanged
+- Applying a ControlNet trained for more blocks to a model with fewer is treated as unsupported and stops the node (the same stance as the LoRA nodes)
+- With `auto_remap` OFF on a model with a different block count, it logs a warning and injects as-is (at blocks that don't correspond)
+
+### Notes
+
+- Image width and height must be multiples of 16 (the VAE downsamples by 8 and Anima's patchify by another 2). Sizes like 832, 1024, 1216 and 1536 are fine; a size such as 1080 that isn't divisible by 16 causes an error
+- "Repair" or "Reinstall" in ComfyUI Manager may replace the fork with the original version. Update the fork with `git pull`
+
 ## About Anima-3.8B (52 blocks) support
 
 [lylogummy/Anima-3.8B](https://huggingface.co/lylogummy/Anima-3.8B) (52 blocks) is a community expansion of Anima-2.9B to 52 blocks (40 native + 12 newly-trained), paired with an optional Qwen3.5 4B cross-attention component for improved prompt adherence. Depending on the release, this component ships either as a separate adapter file (early preview builds) or bundled directly into the main DiT checkpoint (Anima-3.8B v1.1's "Semantic Connector v2" and later) — this packaging has changed at least once already and may change again. This package only concerns itself with the **DiT block structure** of the 52-block checkpoint. Either way it's packaged, the Qwen3.5 component is an additional, self-contained set of keys (`semantic_attentions.*` and related connector keys, not matching any `net.blocks.N` pattern) and isn't touched by remapping at all — detection and remapping only ever look at `net.blocks.N` keys. LoRAs and merges made for the native 40-block Anima-2.9B DiT remap onto the 52-block DiT exactly the same way earlier-generation LoRAs remap onto Anima-2.9B. Confirmed working in practice: Qwen3.5 can be left disconnected entirely (native Qwen3 0.6B path only) and generation still works.
@@ -494,6 +637,15 @@ Anima, Anima-2.9B, and Anima-3.8B (52 blocks) are all distributed under the **Ci
 This tool is intended for personal, non-commercial use. If you're considering commercial use or distribution, always check the primary source — `LICENSE.md` in the Anima repository on Hugging Face, and the license notes on each specific model's page — or consult a professional. Nothing in this README constitutes legal advice.
 
 Note that this license restriction applies to **the Anima model weights themselves** (and to any remapped LoRAs or merged models produced with them) — **the code in this repository** (the Python node implementations) is released under the **MIT License** (see the bundled `LICENSE` file).
+
+There are two exceptions:
+
+- The following contain code from [kohya-ss/ComfyUI-Anima-LLLite](https://github.com/kohya-ss/ComfyUI-Anima-LLLite) and are therefore under the **Apache License 2.0**, not MIT (see `nodes/lllite_vendor/LICENSE-Apache-2.0`). Each states its origin at the top of the file and documents its modifications within it
+  - The code in `nodes/lllite_vendor/` (upstream's `control_net_lllite_anima.py`, with a single change)
+  - `nodes/lllite_remap_anima.py` (the node itself, modified from upstream's `nodes.py`)
+- ComfyUI-Advanced-ControlNet (including the fork), which Node 8 relies on, is **GPL-3.0**. This repository contains none of its code — it only receives and adjusts an object that package creates at runtime — so this repository itself remains MIT
+
+ControlNet model weights (LLLite and VACE) are also subject to the license stated on each distribution page (for example, TaihoC's Depth model uses the CircleStone Labs non-commercial license).
 
 ## Disclaimer and Support Policy
 

@@ -41,6 +41,7 @@ import comfy.sd
 from safetensors.torch import save_file as st_save_file
 
 from .anima_common import (
+    computable,
     get_lora_block_count,
     remap_key,
     remap_key_to_target,
@@ -406,7 +407,7 @@ class AnimaLoRARemapTagLoader:
                                     new_k = remap_key_to_target(k, t_idx)
                                     if new_k is None:
                                         continue
-                                    remapped[new_k] = v * extend_strength
+                                    remapped[new_k] = computable(v) * extend_strength
                                     extended += 1
                             logger.info(
                                 f"'{name}': [experimental] extended {extended} tensors onto "

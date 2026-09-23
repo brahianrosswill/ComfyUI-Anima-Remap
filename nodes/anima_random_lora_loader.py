@@ -37,6 +37,7 @@ import comfy.sd
 import comfy.utils
 
 from .anima_common import (
+    computable,
     get_lora_block_count,
     remap_key,
     build_base_to_target,
@@ -165,7 +166,10 @@ class AnimaRandomLoRALoader:
         excluded = len(found) - len(lora_files)
         if excluded:
             print(f"[AnimaRandomLoRALoader] Excluded {excluded} cached remap file(s) (_animaremap*) from candidates")
-        return lora_files
+        # Sorted so a given seed picks the same LoRAs on any machine (filesystem
+        # enumeration order differs between OSes/filesystems). Same as
+        # RandomLoRALoader v1.3.0.
+        return sorted(lora_files)
 
     def _unique_by_filename(self, lora_files, group_name=""):
         seen, unique_files = {}, []
@@ -231,6 +235,11 @@ class AnimaRandomLoRALoader:
 
     def _load_embedded_metadata(self, lora_path):
         if not SAFETENSORS_AVAILABLE or not os.path.exists(lora_path):
+            return None
+        # safe_open only reads .safetensors; .pt/.ckpt candidates would otherwise
+        # log a spurious read error every time they are picked. Same as
+        # RandomLoRALoader v1.3.0.
+        if not lora_path.lower().endswith(".safetensors"):
             return None
         try:
             with safe_open(lora_path, framework="pt", device="cpu") as f:
@@ -507,7 +516,7 @@ class AnimaRandomLoRALoader:
                     groups = group_by_base_index(lora_sd)
                     extension = build_blended_extension(groups, neighbors, blend_ratio)
                     for k, v in extension.items():
-                        remapped[k] = v * extend_strength
+                        remapped[k] = computable(v) * extend_strength
 
                 lora_sd = remapped
 

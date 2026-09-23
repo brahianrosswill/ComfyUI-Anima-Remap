@@ -4,7 +4,7 @@
 
 > **補足（Anima-3.8B v1.1以降について）：** Animaのチェックポイントによっては、Qwen3.5 4B用のcross-attention部分（`semantic_attentions.*`などのconnector関連キー）が、別ファイルのアダプターとしてではなく、DiT本体と同一ファイルに同梱されている場合があります（Anima-3.8B v1.1の"Semantic Connector v2"以降でこの形になりました）。どちらの形で配布されていても、この部分がremap処理の対象になることはありません——検出・remapともに`net.blocks.N`というキーのみを見ており、connector側のキーはこのパターンに一致しないためです。実機確認済み：Qwen3.5を接続しない状態でも、ネイティブのQwen3 0.6B経路のみで生成は問題なく行えます。詳細は下記「Anima-3.8B（52層）対応について」を参照してください。
 
-Anima系モデル(従来Anima/28層、Anima-2.9B/40層、Anima-3.8B/52層、そして今後登場するかもしれない世代)を横断して、LoRA適用・モデルマージ時のレイヤー構造の違いを自動的に吸収するComfyUIカスタムノードパッケージです。どの2世代の組み合わせであっても対応します。Anima専用のランダムLoRAローダー(フォルダ指定、同じ自動リマップ機構を内蔵)も含まれます。
+Anima系モデル(従来Anima/28層、Anima-2.9B/40層、Anima-3.8B/52層、そして今後登場するかもしれない世代)を横断して、LoRA適用・モデルマージ時のレイヤー構造の違いを自動的に吸収するComfyUIカスタムノードパッケージです。どの2世代の組み合わせであっても対応します。Anima専用のランダムLoRAローダー(フォルダ指定、同じ自動リマップ機構を内蔵)も含まれます。さらに、28層向けに学習されたControlNet(LLLite方式・VACE方式)を40層・52層のモデルで正しく使うためのノードも含まれます。
 
 このリポジトリは、更新を停止した[ComfyUI-Anima29B-Remap](https://github.com/shin131002/ComfyUI-Anima29B-Remap)の後継です。ノード内部IDは変更していないので、そちらのリポジトリ向けに作ったワークフローもそのまま読み込めます。
 
@@ -39,7 +39,14 @@ ComfyUI-Anima-Remap/
 │   ├── model_merge_anima.py                 # モデルマージ(自動リマップ)
 │   ├── model_merge_extended_anima.py        # モデルマージ拡張版(実験的、前後ブレンド)
 │   ├── anima_random_lora_loader.py          # ランダムLoRAローダー、3フォルダ版(自動リマップ)
-│   └── anima_filtered_random_lora_loader.py # ランダムLoRAローダー、1フォルダ+キーワードフィルタ版(自動リマップ)
+│   ├── anima_filtered_random_lora_loader.py # ランダムLoRAローダー、1フォルダ+キーワードフィルタ版(自動リマップ)
+│   ├── lllite_remap_anima.py                # ControlNet-LLLite適用ノード(自動リマップ、kohya-ss版のnodes.pyを改変、Apache 2.0)
+│   ├── lllite_block_remap.py                # LLLite重みのブロック番号付け替え
+│   ├── vace_controlnet_remap_anima.py       # VACE方式ControlNetの注入先変換ノード
+│   └── lllite_vendor/                       # kohya-ss/ComfyUI-Anima-LLLiteから取り込んだコード(Apache 2.0)
+│       ├── __init__.py                      # (空、パッケージ化のため)
+│       ├── control_net_lllite_anima.py      # LLLite本体(変更点はファイル冒頭に明記)
+│       └── LICENSE-Apache-2.0               # 取り込んだコードのライセンス
 └── web/
     └── anima_lora_autocomplete.js           # LoRA名入力補完のフロントエンド(ノード1・3のtext欄)
 ```
@@ -217,6 +224,8 @@ LoRAと同じフォルダにある以下のファイルを、この順で探し�
 > ⚠️ **注意: `save_remapped`をONにしたまま設定を変え続けると、キャッシュファイルがどんどん増えます。**
 >
 > 設定の組み合わせごとに別ファイルが生成され、**自動的に削除されることはありません**。調子に乗って`save_remapped`をONのまま何度も設定を変えて実行すると、試した組み合わせの数だけ`_animaremap<N>_<ハッシュ>`ファイルがLoRAフォルダに溜まっていきます。1つあたりのサイズは元のLoRAとほぼ同じです。
+>
+> ただし、**fp8で保存されたLoRA**で`extend_to_new_layers`もONにしている場合は、新規層への拡張分がfloat32で保存されるため、キャッシュファイルが元のLoRAより大きくなります。PyTorchはCPU上でfp8の演算にほとんど対応していないので、拡張分を計算する際にfloat32へ変換しているためです(読み込みや適用には問題ありません)。
 >
 > `save_remapped`のデフォルトが**OFF**のままなのはこのためで、推奨する運用も従来と変わりません。`save_remapped`はOFFのまま設定を詰め、決まったところで1回だけONにして実行する。溜まってきたら`_animaremap*`ファイルを見渡して、不要なものは削除してください。
 
@@ -447,6 +456,140 @@ LoRA Extended版のキャッシュファイルは、Extended版であること�
 
 ---
 
+## ノード7: Apply Anima ControlNet-LLLite (Auto Remap)
+
+[kohya-ss/ComfyUI-Anima-LLLite](https://github.com/kohya-ss/ComfyUI-Anima-LLLite)の「Apply Anima ControlNet-LLLite (sd-scripts)」ノードを取り込み、28/40/52層のどのモデルにも適用できるようにしたものです。本家はAnima-Base(28層)向けに学習された重みを40層以上のモデルに繋ぐと`depth_embed slices missing`エラーで停止しますが、このノードは重みのブロック番号を接続先モデルの構造に合わせて付け替えてから読み込みます。
+
+<!-- ノード7: Apply Anima ControlNet-LLLite (Auto Remap) -->
+<img src="./images/09.jpg">
+
+- kohya-ss版のインストールは不要です(必要なコードを同梱しています)
+- ノードIDが異なるので、本家のノードやComfyUI本体の「Apply Anima ControlNet-LLLite」ノードと併存できます
+- 28層モデルに繋いだ場合は、本家と完全に同じ動作になります
+- 重みファイルは本家と同じく`models/controlnet`に置きます
+
+### 入力
+
+| 名前 | 型 | 説明 |
+|---|---|---|
+| `model` | MODEL | 適用先のAnimaモデル(28/40/52層) |
+| `lllite_name` | ドロップダウン | `models/controlnet`内のLLLite重みファイル |
+| `image` | IMAGE | 条件画像(線画・深度マップなど) |
+| `strength` | FLOAT | 効きの強さ(-10〜10、デフォルト1.0) |
+| `start_percent` / `end_percent` | FLOAT | 制御を掛けるステップ範囲(0.0〜1.0) |
+| `auto_remap` | BOOLEAN | 重みと接続先モデルの層数が違う場合にブロック番号を付け替える(デフォルトON) |
+| `manifest` | ドロップダウン | `Auto (Recommended)`(デフォルト)は層数の組み合わせから自動選択。特定のファイルを選ぶとそれを強制 |
+| `extend_to_new_layers` | BOOLEAN | 新規挿入ブロックにも制御を掛ける(デフォルトOFF、下記参照) |
+| `extend_strength` | FLOAT | 新規挿入ブロックに掛ける制御の強さ(0〜2、デフォルト0.5) |
+| `preserve_wrapper` | BOOLEAN | 前段のノードが設定したモデルのwrapperを上書きせず、連鎖させる(デフォルトON)。ノードを多段に重ねる場合はONのまま |
+| `mask` *(任意)* | MASK | 4チャンネル(inpaint)用の重みでのみ必須。白が描き直す領域、黒が保持する領域 |
+
+### 出力
+
+| 名前 | 型 | 説明 |
+|---|---|---|
+| `model` | MODEL | LLLiteを適用したモデル |
+| `remap_info` | STRING | 検出した層数と行った処理(例: `28->40 via expand_manifest_28_40.json, 84 tensors remapped, 0 dropped`) |
+
+### 層数が違うモデルでの動作
+
+- **上方向(28層用の重みを40層・52層に)**：学習済みのモジュールを、元のブロックに対応する位置へ付け替えます。新規挿入されたブロック(28→40なら12ブロック)には対応する学習済みモジュールが無いため、デフォルトでは何もしません。LLLiteのモジュールは最終段の重みがゼロで初期化されているので、重みが読み込まれなかったモジュールの出力は厳密にゼロになり、画像に悪影響はありません
+- **`extend_to_new_layers`をONにした場合**：新規ブロックに、その直前の元ブロックのモジュールを丸ごとコピーします。Animaの新規ブロックはモデル拡張時に直前のブロックをコピーして作られているため、直前のブロック用に学習されたモジュールが最も近い役割を持つ、という考え方です。2つのブロックの重みを平均する方式は、LLLiteの補正が低ランクの積で表されるため意味のある結果にならないので採用していません。`extend_strength`は最終段にだけ掛かるので、コピーしたモジュールの効きがちょうどその倍率になります
+- **下方向(40層用の重みを28層に)**：挿入ブロックに相当する分の重みは載せる先が無いため破棄します
+- 対応するmanifestが無い層数の組み合わせは、間違った位置に載せないよう停止します
+- `auto_remap`をOFFにしたまま層数が違うモデルに繋ぐと、エラーにはなりませんが、重みが対応しない位置に載ります。この場合は警告ログと`remap_info`で明示します
+
+### ノードを多段に重ねる
+
+各ノードは自分の`start_percent`〜`end_percent`の範囲外では何もしないため、同じ重みのノードを2つ重ね、範囲をずらすことで、ステップの途中で強度を変えられます(`preserve_wrapper`はONのまま)。
+
+```
+[モデル] → [LLLite A] → [LLLite B] → KSampler
+
+A: strength 1.5〜2.0  start 0.0  end 0.4   ← 構図を強く固める
+B: strength 0.5〜0.8  start 0.4  end 1.0   ← 後半も弱く効かせて引き戻しを防ぐ
+```
+
+`end_percent`を1.0にしたまま強度を上げると後半のディテールが破綻しやすく、`end_percent`を下げると制御が切れた後にプロンプト側へ引き戻されやすい、という両方の問題を別々に調整できます。数値は出発点の目安です。
+
+### 効きについて
+
+LLLiteは名前の通り軽量な方式で、従来方式のControlNetに比べると拘束力は控えめです。公開されているサンプル重みは各ブロックのself-attentionのクエリにだけ補正を加える構成のため、プロンプトの影響は弱まらず、条件画像と矛盾するプロンプトやLoRAがあるとそちらに引っ張られやすくなります。効きが足りない場合は、`strength`を上げる、CFGを下げる、矛盾するプロンプトを外す、などを試してください。より強い拘束が必要な場合は、ノード8のVACE方式ControlNetを検討してください。
+
+### 本家からの変更点
+
+取り込んだ`control_net_lllite_anima.py`への変更は、`depth_embed`が不足しているモジュールをエラーにせずゼロで埋める1箇所だけです。変更内容はファイル冒頭に明記しています。ノード本体は、読み込み時のブロック番号付け替えと入出力の追加以外、条件画像の前処理・ステップ範囲の制御・wrapperの扱い・inpaint経路まで本家のままです。
+
+## ノード8: Anima VACE ControlNet Remap
+
+VACE方式のControlNet(従来方式、下記参照)を40層・52層のモデルで正しく使うための変換ノードです。ControlNetの読み込みと適用は[ComfyUI-Advanced-ControlNet](https://github.com/Kosinkadink/ComfyUI-Advanced-ControlNet)のフォーク版が行い、このノードはその間に挟んで注入先だけを書き換えます。
+
+<!-- ノード8: Anima VACE ControlNet Remap -->
+<img src="./images/10.jpg">
+
+### なぜ必要か
+
+VACE方式のControlNetは、条件画像を処理する小さな別ネットワーク(制御ブランチ)の出力を、Anima本体の特定のブロックの出力に足し込みます。現在公開されているモデルは28層のAnima-Baseで学習されており、足し込み先はブロック0・7・14・21です。
+
+40層・52層のモデルに繋ぐと、ローダーは**エラーを出さずに、そのままブロック0・7・14・21に足し込みます**。層が挿入された後のモデルでは同じ番号が物理的に別のブロックを指すため、本来とは違う深さに制御が入り、効きが悪くなったり不安定になったりします。このノードはmanifestを使って足し込み先を正しい位置に付け替えます。
+
+| 接続先モデル | 足し込み先のブロック |
+|---|---|
+| 28層(Anima-Base) | 0・7・14・21(変更なし) |
+| 40層(Anima-2.9B) | 0・10・20・31 |
+| 52層(Anima-3.8B) | 0・13・26・41 |
+
+### 前提となるもの
+
+- **ComfyUI-Advanced-ControlNetのフォーク版**：PineCookie氏の[`fix/anima-vace-hardening`](https://github.com/PineCookie/ComfyUI-Advanced-ControlNet/tree/fix/anima-vace-hardening)ブランチ。VACE方式の読み込みに対応しており、生成の中断後に制御が何重にも掛かって画像がノイズ化する不具合も修正されています。本家のComfyUI-Advanced-ControlNetが入っている場合は、フォルダ名を`ComfyUI-Advanced-ControlNet.disabled`に変えて無効化してから、`custom_nodes`で次を実行します
+  ```
+  git clone -b fix/anima-vace-hardening https://github.com/PineCookie/ComfyUI-Advanced-ControlNet.git
+  ```
+- **VACE方式のControlNetモデル**(`models/controlnet`に配置)
+  - Depth: [TaihoC/Anima-ControlNet-VACE-Depth](https://huggingface.co/TaihoC/Anima-ControlNet-VACE-Depth)
+  - Canny: [khanghy1000/Anima-ControlNet-VACE-Canny](https://huggingface.co/khanghy1000/Anima-ControlNet-VACE-Canny)
+
+このノード自体はフォーク版のコードをimportしないので、フォーク版を入れていない環境でもAnima-Remapは普通に読み込めます。フォーク版が必要になるのは、このノードを使うときだけです。
+
+### 接続例
+
+```
+[Load Advanced ControlNet Model] ─CONTROL_NET→ [Anima VACE ControlNet Remap] ─→ [Apply Advanced ControlNet]
+[モデルローダー] ──────────────MODEL──────────↗
+```
+
+- ControlNetの読み込みは、末尾に🛂🅐🅒🅝が付いた**Load Advanced ControlNet Model**を使ってください(本体の「Load ControlNet Model」や「ControlNet++ Loader」ではVACE方式を判別できません)
+- `model`には、KSamplerに繋いでいるのと同じモデルを入れてください
+
+### 入力
+
+| 名前 | 型 | 説明 |
+|---|---|---|
+| `control_net` | CONTROL_NET | Load Advanced ControlNet Modelで読み込んだVACE方式のControlNet |
+| `model` | MODEL | 適用先のAnimaモデル(層数の判定に使用) |
+| `auto_remap` | BOOLEAN | 層数が違う場合に足し込み先を付け替える(デフォルトON) |
+| `manifest` | ドロップダウン | `Auto (Recommended)`(デフォルト)は層数の組み合わせから自動選択。特定のファイルを選ぶとそれを強制 |
+
+### 出力
+
+| 名前 | 型 | 説明 |
+|---|---|---|
+| `control_net` | CONTROL_NET | 足し込み先を付け替えたControlNet(Apply Advanced ControlNetへ) |
+| `remap_info` | STRING | 行った処理(例: `28->40 via expand_manifest_28_40.json, injection blocks [0, 7, 14, 21] -> [0, 10, 20, 31]`) |
+
+### 動作の詳細
+
+- 足し込み先は0・7・14・21と決め打ちせず、読み込んだControlNetの中身から読み取ります。今後、制御ブロックの数や間隔が違うVACEモデルが公開されても、そのまま対応できます
+- 書き換えるのは足し込み先の番号だけで、制御ブランチの計算や重みには一切触れません。重みはメモリ上で複製されず、ローダーが保持している元のControlNetも書き換えないので、28層と40層のモデルを切り替えても毎回正しく変換されます
+- 28層向けのControlNetを28層モデルに繋いだ場合は何もしません
+- 大きい層数向けに学習されたControlNetを小さい層数のモデルに繋ぐ使い方は想定外として停止します(LoRAの各ノードと同じ方針)
+- `auto_remap`をOFFにしたまま層数が違うモデルに繋ぐと、警告ログを出した上でそのまま(対応しない位置に)足し込みます
+
+### 注意点
+
+- 生成する画像の縦横は16の倍数にしてください(VAEで1/8、Animaのパッチ化で1/2になるため)。832・1024・1216・1536などは問題ありません。1080のように16で割り切れないサイズはエラーになります
+- ComfyUI Managerでフォーク版を「修復」や「再インストール」すると、本家版に戻される可能性があります。フォーク版の更新は`git pull`で行ってください
+
 ## Anima-3.8B(52層)対応について
 
 [lylogummy/Anima-3.8B](https://huggingface.co/lylogummy/Anima-3.8B)(52層)は、Anima-2.9Bをコミュニティが52ブロック(既存40ブロック+新規学習12ブロック)まで拡張したモデルで、プロンプト理解力向上のためのQwen3.5 4B cross-attentionコンポーネント(オプション)と対になっています。このコンポーネントはリリースによって、別ファイルのアダプターとして配布される場合(初期のpreview版)と、DiT本体のチェックポイントに同梱される場合(Anima-3.8B v1.1の"Semantic Connector v2"以降)があり、この配布形態は既に一度変わっており、今後さらに変わる可能性もあります。本パッケージが扱うのは52層チェックポイントの**DiTブロック構造のみ**です。どちらの形で配布されていても、Qwen3.5コンポーネントは独立した追加キー群(`semantic_attentions.*`など、どの`net.blocks.N`パターンにも一致しない関連キー)であり、リマップ処理は一切関与しません——検出・リマップともに`net.blocks.N`というキーのみを見ています。従来40層Anima-2.9BのDiT向けに作られたLoRA・マージ用モデルは、これまでのAnima-2.9B向けリマップと全く同じ考え方で52層のDiTにリマップされます。実機確認済み：Qwen3.5を完全に未接続にしても(ネイティブのQwen3 0.6B経路のみ)、生成は問題なく行えます。
@@ -494,6 +637,15 @@ Anima(base)・Anima-2.9B・Anima-3.8B(52層)は、いずれも**CircleStone Labs
 本ツールは個人利用・非商用での使用を前提としています。商用利用や配布を検討する場合は、必ず一次情報である`LICENSE.md`(Hugging Face上のAnimaリポジトリに同梱)や各モデルページのライセンス記載を確認するか、専門家に相談してください。本READMEの記載は法的助言ではありません。
 
 なお、このライセンス制約は**Animaのモデル重み自体(および、それを使って作られたリマップ済みLoRA・マージ済みモデル)に適用されるもの**であり、本リポジトリの**コード自体(ノードのPython実装)はMITライセンス**(同梱の`LICENSE`ファイル参照)の下で公開しています。
+
+ただし例外が2点あります。
+
+- 次の2つは[kohya-ss/ComfyUI-Anima-LLLite](https://github.com/kohya-ss/ComfyUI-Anima-LLLite)のコードを含むため、MITではなく**Apache License 2.0**です(`nodes/lllite_vendor/LICENSE-Apache-2.0`参照)。いずれもファイル冒頭に出所を、改変箇所をファイル内に明記しています
+  - `nodes/lllite_vendor/`内のコード(本家の`control_net_lllite_anima.py`を取り込み、1箇所のみ変更)
+  - `nodes/lllite_remap_anima.py`(本家の`nodes.py`を改変したノード本体)
+- ノード8が前提とするComfyUI-Advanced-ControlNet(フォーク版を含む)は**GPL-3.0**です。本リポジトリはそのコードを一切含まず、実行時に同パッケージが生成したオブジェクトを受け取って調整するだけなので、本リポジトリ自体はMITのままです
+
+ControlNetのモデル重み(LLLite・VACE)にも、それぞれの配布ページに記載されたライセンスが適用されます(例: TaihoC氏のDepthはCircleStone Labsの非商用ライセンス)。
 
 ## 免責事項とサポートポリシー
 

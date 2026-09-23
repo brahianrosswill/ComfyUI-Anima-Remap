@@ -21,6 +21,14 @@ from .nodes.anima_random_lora_loader import (
 # Imported for its side effect: registers the /anima_remap/* routes used by the
 # LoRA autocomplete in the tag loader text box (web/anima_lora_autocomplete.js).
 from .nodes import lora_autocomplete_api  # noqa: F401
+from .nodes.lllite_remap_anima import (
+    NODE_CLASS_MAPPINGS as LLLITE_REMAP_CLASS,
+    NODE_DISPLAY_NAME_MAPPINGS as LLLITE_REMAP_DISPLAY,
+)
+from .nodes.vace_controlnet_remap_anima import (
+    NODE_CLASS_MAPPINGS as VACE_REMAP_CLASS,
+    NODE_DISPLAY_NAME_MAPPINGS as VACE_REMAP_DISPLAY,
+)
 from .nodes.anima_filtered_random_lora_loader import (
     NODE_CLASS_MAPPINGS as _FILTERED_RANDOM_LORA_NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS as _FILTERED_RANDOM_LORA_NODE_DISPLAY_NAME_MAPPINGS,
@@ -33,6 +41,8 @@ NODE_CLASS_MAPPINGS = {
     **_MERGE_EXT_NODE_CLASS_MAPPINGS,
     **_RANDOM_LORA_NODE_CLASS_MAPPINGS,
     **_FILTERED_RANDOM_LORA_NODE_CLASS_MAPPINGS,
+    **LLLITE_REMAP_CLASS,
+    **VACE_REMAP_CLASS,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     **_LORA_NODE_DISPLAY_NAME_MAPPINGS,
@@ -41,6 +51,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     **_MERGE_EXT_NODE_DISPLAY_NAME_MAPPINGS,
     **_RANDOM_LORA_NODE_DISPLAY_NAME_MAPPINGS,
     **_FILTERED_RANDOM_LORA_NODE_DISPLAY_NAME_MAPPINGS,
+    **LLLITE_REMAP_DISPLAY,
+    **VACE_REMAP_DISPLAY,
 }
 
 WEB_DIRECTORY = "./web"

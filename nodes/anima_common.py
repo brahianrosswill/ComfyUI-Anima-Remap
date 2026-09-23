@@ -431,3 +431,34 @@ def peek_lora_block_count(path):
     except Exception as e:
         logger.debug(f"header peek failed for {path}: {e}")
         return None
+
+
+# ---------------------------------------------------------------------------
+# fp8-safe arithmetic
+# ---------------------------------------------------------------------------
+
+def is_float8(t):
+    """True for any 1-byte floating-point tensor (float8_e4m3fn, float8_e5m2, fnuz variants)."""
+    try:
+        return t.is_floating_point() and t.element_size() == 1
+    except Exception:
+        return False
+
+
+def computable(t):
+    """
+    The tensor, upcast to float32 only if it is fp8.
+
+    Weights distributed in fp8 load fine, but PyTorch implements almost no
+    arithmetic for fp8 on the CPU -- even `t * 0.5` raises
+    "mul_cpu_reduced_float not implemented for 'Float8_e5m2'". Anything this
+    package computes from loaded weights (extension scaling, front/back blends)
+    must go through this first. Non-fp8 tensors are returned unchanged, so
+    bf16/fp16/fp32 behaviour is exactly as before.
+    """
+    return t.float() if is_float8(t) else t
+
+
+def upcast_float8_state_dict(sd):
+    """Upcast only the fp8 tensors of a state dict to float32 (see computable())."""
+    return {k: computable(v) for k, v in sd.items()}

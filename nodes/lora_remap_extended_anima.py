@@ -26,6 +26,7 @@ import comfy.utils
 import comfy.sd
 
 from .anima_common import (
+    computable,
     get_lora_block_count,
     remap_key,
     split_block_key,
@@ -105,7 +106,7 @@ def build_blended_extension(groups, neighbors, blend_ratio):
             if prev_entry and next_entry:
                 prefix, sep, v_prev = prev_entry
                 _, _, v_next = next_entry
-                blended = v_prev * blend_ratio + v_next * (1.0 - blend_ratio)
+                blended = computable(v_prev) * blend_ratio + computable(v_next) * (1.0 - blend_ratio)
             elif prev_entry:
                 # Only the front neighbor exists -- no other side to blend
                 # against, so use it at full strength.
@@ -248,7 +249,7 @@ class AnimaLoRARemapExtendedTagLoader:
                             groups = group_by_base_index(lora_sd)
                             extension = build_blended_extension(groups, neighbors, blend_ratio)
                             for k, v in extension.items():
-                                remapped[k] = v * extend_strength
+                                remapped[k] = computable(v) * extend_strength
                             logger.info(
                                 f"'{name}': [experimental] extended {len(extension)} tensors onto "
                                 f"newly-inserted layers via front/back blend "
