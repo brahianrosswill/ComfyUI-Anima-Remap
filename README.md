@@ -587,7 +587,7 @@ This node doesn't import any of the fork's code, so Anima-Remap loads normally e
 
 ### Notes
 
-- Image width and height must be multiples of 16 (the VAE downsamples by 8 and Anima's patchify by another 2). Sizes like 832, 1024, 1216 and 1536 are fine; a size such as 1080 that isn't divisible by 16 causes an error
+- Multiples of 16 are recommended for image width and height (the VAE downsamples by 8 and Anima's patchify by another 2), e.g. 832, 1024, 1216, 1536. The fork above also handles sizes not divisible by 16 (such as 1080), but older forks have been reported to error on them, so multiples of 16 are the safe choice
 - "Repair" or "Reinstall" in ComfyUI Manager may replace the fork with the original version. Update the fork with `git pull`
 
 ## About Anima-3.8B (52 blocks) support
