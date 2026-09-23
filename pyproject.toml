@@ -1,6 +1,6 @@
 [project]
 name = "anima-remap"
-description = "Auto block-index remapping for applying LoRAs and merging models across the Anima model family (Anima, Anima-2.9B, Anima-3.8B/Pro52, and future generations)"
+description = "Use LoRAs, model merges and ControlNets (LLLite/VACE) across Anima generations (Anima, 2.9B, 3.8B/Pro52 and beyond) with automatic block-index remapping"
 version = "1.3.0"
 license = {file = "LICENSE"}
 
